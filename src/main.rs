@@ -66,6 +66,123 @@ pub struct OleFile {
     fat: Vec<u32>,
 }
 
+impl OleFile {
+    pub fn new(raw: Vec<u8>) -> Self {
+        let filesize: u64 = raw.len() as u64;
+
+        let header: [u8; 76] = raw[..76].try_into().unwrap();
+        let header = OleHeader::unpack(&header).unwrap();
+        validate_header(&header);
+
+        let sector_size = u32::pow(2, header.sector_shift as u32);
+        let mini_sector_size = u32::pow(2, header.mini_sector_shift as u32);
+        let nb_sect = ((filesize as u32 + sector_size - 1) / sector_size) - 1;
+
+        Self {
+            raw,
+            header,
+            sector_size,
+            mini_sector_size,
+            nb_sect,
+            used_streams_fat: Vec::new(),
+            used_streams_minifat: Vec::new(),
+            fat: Vec::new(),
+        }
+    }
+
+    fn init(&mut self) {
+        self.check_duplicate_stream(self.header.first_dir_sector, false);
+        if self.header.num_mini_fat_sectors > 0 {
+            self.check_duplicate_stream(self.header.first_mini_fat_sector, false);
+        }
+        if self.header.num_difat_sectors > 0 {
+            self.check_duplicate_stream(self.header.first_difat_sector, false);
+        }
+
+        self.load_fat();
+    }
+
+    fn check_duplicate_stream(&mut self, first_sect: u32, minifat: bool) {
+        if minifat {
+            assert!(!self.used_streams_minifat.contains(&first_sect));
+            self.used_streams_minifat.push(first_sect);
+        } else {
+            if [DIFSECT, FATSECT, ENDOFCHAIN, FREESECT].contains(&first_sect) {
+                return;
+            }
+            assert!(!self.used_streams_fat.contains(&first_sect));
+            self.used_streams_fat.push(first_sect);
+        }
+    }
+
+    fn load_fat_sect(&mut self, sect_start: usize, sect_end: usize) {
+        let sect = &self.raw[sect_start..sect_end];
+        let fat1: &[u32] = sect_to_array(sect);
+
+        for isect in fat1 {
+            let isect = isect & 0xFFFFFFFF;
+            if isect == ENDOFCHAIN || isect == FREESECT {
+                break;
+            }
+            let start = (self.sector_size * (isect + 1)) as usize;
+            let s = &self.raw[start..(start + self.sector_size as usize)];
+            assert_eq!(s.len(), self.sector_size as usize);
+            let next_fat = sect_to_array(s);
+            self.fat.extend_from_slice(&next_fat);
+        }
+    }
+
+    fn load_fat(&mut self) {
+        self.load_fat_sect(76, 512);
+        if self.header.num_difat_sectors != 0 {
+            assert!(self.header.num_fat_sectors > 109);
+            assert!(self.header.first_difat_sector < self.nb_sect);
+            // TODO finish
+            assert!(1 == 0);
+        }
+    }
+
+    fn print(&self) {
+        println!("magic: {:?}", self.header.magic);
+        println!("clsid: {:?}", self.header.clsid);
+        println!("minor_version: {:?}", self.header.minor_version);
+        println!("dll_version: {:?}", self.header.dll_version);
+        println!("byte_order: {:?}", self.header.byte_order);
+        println!("sector_shift: {:?}", self.header.sector_shift);
+        println!("mini_sector_shift: {:?}", self.header.mini_sector_shift);
+        println!("reserved1: {:?}", self.header.reserved1);
+        println!("reserved2: {:?}", self.header.reserved2);
+        println!("num_dir_sectors: {:?}", self.header.num_dir_sectors);
+        println!("num_fat_sectors: {:?}", self.header.num_fat_sectors);
+        println!("first_dir_sector: {:?}", self.header.first_dir_sector);
+        println!(
+            "transaction_signature_number: {:?}",
+            self.header.transaction_signature_number
+        );
+        println!(
+            "mini_stream_cutoff_size: {:?}",
+            self.header.mini_stream_cutoff_size
+        );
+        println!(
+            "first_mini_fat_sector: {:?}",
+            self.header.first_mini_fat_sector
+        );
+        println!(
+            "num_mini_fat_sectors: {:?}",
+            self.header.num_mini_fat_sectors
+        );
+        println!("first_difat_sector: {:?}", self.header.first_difat_sector);
+        println!("num_difat_sectors: {:?}", self.header.num_difat_sectors);
+
+        println!();
+        println!("sector_size: {:?}", self.sector_size);
+        println!("mini_sector_size: {:?}", self.mini_sector_size);
+        println!("nb_sect: {:?}", self.nb_sect);
+        println!("used_streams_fat: {:?}", self.used_streams_fat);
+        println!("used_streams_minifat: {:?}", self.used_streams_minifat);
+    }
+}
+
 fn validate_header(header: &OleHeader) {
     assert_eq!(header.magic, MAGIC);
     assert_eq!(header.clsid, CLSID);
@@ -85,49 +202,8 @@ fn validate_header(header: &OleHeader) {
     assert_eq!(header.mini_stream_cutoff_size, 4096);
 }
 
-fn check_duplicate_stream(file: &mut OleFile, first_sect: u32, minifat: bool) {
-    if minifat {
-        assert!(!file.used_streams_minifat.contains(&first_sect));
-        file.used_streams_minifat.push(first_sect);
-    } else {
-        if [DIFSECT, FATSECT, ENDOFCHAIN, FREESECT].contains(&first_sect) {
-            return;
-        }
-        assert!(!file.used_streams_fat.contains(&first_sect));
-        file.used_streams_fat.push(first_sect);
-    }
-}
-
 fn sect_to_array(sect: &[u8]) -> &[u32] {
     cast_slice(sect)
-}
-
-fn load_fat_sect(file: &mut OleFile, sect_start: usize, sect_end: usize) {
-    let sect = &file.raw[sect_start..sect_end];
-    let fat1: &[u32] = sect_to_array(sect);
-
-    for isect in fat1 {
-        let isect = isect & 0xFFFFFFFF;
-        if isect == ENDOFCHAIN || isect == FREESECT {
-            break;
-        }
-        let start = (file.sector_size * (isect + 1)) as usize;
-        let s = &file.raw[start..(start + file.sector_size as usize)];
-        assert_eq!(s.len(), file.sector_size as usize);
-        let next_fat = sect_to_array(s);
-        file.fat.extend_from_slice(&next_fat);
-    }
-}
-
-fn load_fat(file: &mut OleFile) {
-    load_fat_sect(file, 76, 512);
-    println!("loaded fat len: {:?}", file.fat.len());
-    if file.header.num_difat_sectors != 0 {
-        assert!(file.header.num_fat_sectors > 109);
-        assert!(file.header.first_difat_sector < file.nb_sect);
-        // TODO finish
-        assert!(1 == 0);
-    }
 }
 
 // fn open_stream_help(file: &mut OleFile, sect: u32, force_fat: bool) -> OleStream {}
@@ -143,75 +219,13 @@ fn main() {
     let mut raw: Vec<u8> = Vec::new();
 
     file.read_to_end(&mut raw).unwrap();
-    let filesize: u64 = raw.len() as u64;
-    println!("bytes read from {}: {:?}", filename, filesize);
+    println!("bytes read from {}: {:?}", filename, raw.len());
     println!("{:?}...", &raw[..100]);
 
-    let header: [u8; 76] = raw[..76].try_into().unwrap();
-    let header = OleHeader::unpack(&header).unwrap();
+    let mut olefile = OleFile::new(raw);
+    olefile.init();
 
-    println!("magic: {:?}", header.magic);
-    println!("clsid: {:?}", header.clsid);
-    println!("minor_version: {:?}", header.minor_version);
-    println!("dll_version: {:?}", header.dll_version);
-    println!("byte_order: {:?}", header.byte_order);
-    println!("sector_shift: {:?}", header.sector_shift);
-    println!("mini_sector_shift: {:?}", header.mini_sector_shift);
-    println!("reserved1: {:?}", header.reserved1);
-    println!("reserved2: {:?}", header.reserved2);
-    println!("num_dir_sectors: {:?}", header.num_dir_sectors);
-    println!("num_fat_sectors: {:?}", header.num_fat_sectors);
-    println!("first_dir_sector: {:?}", header.first_dir_sector);
-    println!(
-        "transaction_signature_number: {:?}",
-        header.transaction_signature_number
-    );
-    println!(
-        "mini_stream_cutoff_size: {:?}",
-        header.mini_stream_cutoff_size
-    );
-    println!("first_mini_fat_sector: {:?}", header.first_mini_fat_sector);
-    println!("num_mini_fat_sectors: {:?}", header.num_mini_fat_sectors);
-    println!("first_difat_sector: {:?}", header.first_difat_sector);
-    println!("num_difat_sectors: {:?}", header.num_difat_sectors);
-
-    validate_header(&header);
-
-    let sector_size = u32::pow(2, header.sector_shift as u32);
-    let mini_sector_size = u32::pow(2, header.mini_sector_shift as u32);
-    let nb_sect = ((filesize as u32 + sector_size - 1) / sector_size) - 1;
-
-    let mut olefile = OleFile {
-        raw,
-        header,
-        sector_size,
-        mini_sector_size,
-        nb_sect,
-        used_streams_fat: Vec::new(),
-        used_streams_minifat: Vec::new(),
-        fat: Vec::new(),
-    };
-
-    let first_dir_sector = olefile.header.first_dir_sector;
-    check_duplicate_stream(&mut olefile, first_dir_sector, false);
-    if olefile.header.num_mini_fat_sectors > 0 {
-        let first_mini_fat_sector = olefile.header.first_mini_fat_sector;
-        check_duplicate_stream(&mut olefile, first_mini_fat_sector, false);
-    }
-    if olefile.header.num_difat_sectors > 0 {
-        let first_difat_sector = olefile.header.first_difat_sector;
-        check_duplicate_stream(&mut olefile, first_difat_sector, false);
-    }
-
-    println!();
-    println!("sector_size: {:?}", olefile.sector_size);
-    println!("mini_sector_size: {:?}", olefile.mini_sector_size);
-    println!("nb_sect: {:?}", olefile.nb_sect);
-    println!("used_streams_fat: {:?}", olefile.used_streams_fat);
-    println!("used_streams_minifat: {:?}", olefile.used_streams_minifat);
-
-    load_fat(&mut olefile);
-    // load_directory(&mut olefile, first_dir_sector);
+    olefile.print();
 
     // impl _parseinfo and _parseagile to get crypto values and type
 }
