@@ -21,10 +21,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aaa3a8d9a1ca92e282c96a32d6511b695d7d994d1d102ba85d279f9b2756947f"
 
 [[package]]
+name = "derivative"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcc3dd5e9e9c0b295d6e1e4d811fb6f157d5ffd784b8d202fc62eac8035a770b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "docx-decrypt"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "derivative",
  "packed_struct",
 ]
 

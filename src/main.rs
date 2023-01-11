@@ -1,5 +1,8 @@
 use bytemuck::cast_slice;
+use derivative::Derivative;
 use packed_struct::prelude::*;
+use std::collections::HashMap;
+use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -8,18 +11,22 @@ const MAGIC: [u8; 8] = [208, 207, 17, 224, 161, 177, 26, 225];
 const ZERO_CLSID: [u8; 16] = [0; 16];
 const BYTE_ORDER: u16 = 65534;
 
-const DIFSECT: u32 = 0xFFFFFFFC;
-const FATSECT: u32 = 0xFFFFFFFD;
-const ENDOFCHAIN: u32 = 0xFFFFFFFE;
-const FREESECT: u32 = 0xFFFFFFFF;
-const UNKNOWN_SIZE: u32 = 0x7FFFFFFF;
+const DIFSECT: u32 = 0xFFFF_FFFC;
+const FATSECT: u32 = 0xFFFF_FFFD;
+const ENDOFCHAIN: u32 = 0xFFFF_FFFE;
+const FREESECT: u32 = 0xFFFF_FFFF;
+
+// const MAXREGSID: u32 = 0xFFFF_FFFA;
+const NOSTREAM: u32 = 0xFFFF_FFFF;
 
 const STGTY_EMPTY: u8 = 0;
 const STGTY_STORAGE: u8 = 1;
 const STGTY_STREAM: u8 = 2;
-const STGTY_LOCKBYTES: u8 = 3;
-const STGTY_PROPERTY: u8 = 4;
+// const STGTY_LOCKBYTES: u8 = 3;
+// const STGTY_PROPERTY: u8 = 4;
 const STGTY_ROOT: u8 = 5;
+
+const UNKNOWN_SIZE: u32 = 0x7FFF_FFFF;
 
 // little-endian
 #[derive(PackedStruct)]
@@ -63,6 +70,27 @@ pub struct OleHeader {
     num_difat_sectors: u32,
 }
 
+impl OleHeader {
+    fn validate_header(&mut self) {
+        assert_eq!(self.magic, MAGIC);
+        assert_eq!(self.clsid, ZERO_CLSID);
+        assert!(self.dll_version == 3 || self.dll_version == 4);
+        assert_eq!(self.byte_order, BYTE_ORDER);
+        assert!(self.sector_shift == 9 || self.sector_shift == 12);
+        assert!(
+            (self.dll_version == 3 && self.sector_shift == 9)
+                || (self.dll_version == 4 && self.sector_shift == 12)
+        );
+        assert_eq!(self.mini_sector_shift, 6);
+        assert_eq!(self.reserved1, 0);
+        assert_eq!(self.reserved2, 0);
+        assert!(self.dll_version == 4 || self.num_dir_sectors == 0);
+        assert_eq!(self.transaction_signature_number, 0);
+        // TODO set to 4096 if not already
+        assert_eq!(self.mini_stream_cutoff_size, 4096);
+    }
+}
+
 #[allow(dead_code)]
 pub struct OleFile {
     raw: Vec<u8>,
@@ -72,23 +100,28 @@ pub struct OleFile {
     nb_sect: u32,
     used_streams_fat: Vec<u32>,
     used_streams_minifat: Vec<u32>,
+    // TODO should these be i32 not u32??
     fat: Vec<u32>,
+    minifat: Vec<u32>,
     directory_fp: OleStream,
-    direntries: Vec<Option<OleDirentry>>,
-    root_ind: usize,
+    direntries: Vec<OleDirentry>,
+    ministream: Option<OleStream>,
+    root_sid: usize,
 }
 
 impl OleFile {
     pub fn new(raw: Vec<u8>) -> Self {
-        let filesize: u64 = raw.len() as u64;
+        // u32::MAX bytes = ~4.2GB which i can live with
+        let filesize = raw.len() as u32;
+        assert!(filesize > 76);
 
         let header: [u8; 76] = raw[..76].try_into().unwrap();
-        let header = OleHeader::unpack(&header).unwrap();
-        validate_header(&header);
+        let mut header = OleHeader::unpack(&header).unwrap();
+        header.validate_header();
 
         let sector_size = u32::pow(2, header.sector_shift as u32);
         let mini_sector_size = u32::pow(2, header.mini_sector_shift as u32);
-        let nb_sect = ((filesize as u32 + sector_size - 1) / sector_size) - 1;
+        let nb_sect = ((filesize + sector_size - 1) / sector_size) - 1;
 
         Self {
             raw,
@@ -99,15 +132,26 @@ impl OleFile {
             used_streams_fat: Vec::new(),
             used_streams_minifat: Vec::new(),
             fat: Vec::new(),
+            minifat: Vec::new(),
             directory_fp: OleStream::default(),
             direntries: Vec::new(),
-            root_ind: 0,
+            ministream: None,
+            root_sid: 0,
         }
+    }
+
+    pub fn from_file(filename: String) -> Self {
+        let mut file = File::open(filename).unwrap();
+        let mut raw: Vec<u8> = Vec::new();
+        file.read_to_end(&mut raw).unwrap();
+
+        return OleFile::new(raw);
     }
 
     pub fn init(&mut self) {
         self.check_duplicate_stream(self.header.first_dir_sector, false);
         if self.header.num_mini_fat_sectors > 0 {
+            // [minifat: false] is not a mistake here
             self.check_duplicate_stream(self.header.first_mini_fat_sector, false);
         }
         if self.header.num_difat_sectors > 0 {
@@ -136,7 +180,9 @@ impl OleFile {
         let fat1: &[u32] = sect_to_array(sect);
 
         for isect in fat1 {
-            let isect = isect & 0xFFFFFFFF;
+            // labeled as JYTHON-WORKAROUND in the olefile code
+            // let isect = isect & 0xFFFFFFFF;
+            let isect = *isect;
             if isect == ENDOFCHAIN || isect == FREESECT {
                 break;
             }
@@ -144,17 +190,17 @@ impl OleFile {
             let s = &self.raw[start..(start + self.sector_size as usize)];
             assert_eq!(s.len(), self.sector_size as usize);
             let next_fat = sect_to_array(s);
-            self.fat.extend_from_slice(&next_fat);
+            self.fat.extend_from_slice(next_fat);
         }
     }
 
     fn load_fat(&mut self) {
         self.load_fat_sect(76, 512);
-        if self.header.num_difat_sectors != 0 {
+        if self.header.num_difat_sectors > 0 {
             assert!(self.header.num_fat_sectors > 109);
             assert!(self.header.first_difat_sector < self.nb_sect);
             // TODO finish
-            assert!(1 == 0);
+            panic!("unimplemented num_difat_sectors > 0");
         }
 
         if self.fat.len() as u32 > self.nb_sect {
@@ -163,46 +209,144 @@ impl OleFile {
     }
 
     fn load_directory(&mut self, sect: u32) {
-        self.directory_fp = self.open_helper(sect, UNKNOWN_SIZE, true);
+        self.directory_fp = self.open_helper(sect, UNKNOWN_SIZE as u64, true);
         let max_entries = self.directory_fp.size / 128;
         // build direntries and figure out what struct type each is
-        self.direntries = vec![None; max_entries as usize];
+        self.direntries = vec![OleDirentry::default(); max_entries as usize];
         self.load_direntry(0);
-        // self.direntries[self.root_ind].unwrap().build_storage_tree();
-
-        // self.direntries = [None] * max_entries
-        // root_entry = self._load_direntry(0)
-        // self.root = self.direntries[0]
-        // self.root.build_storage_tree()
+        self.build_storage_tree(self.root_sid);
     }
 
-    fn load_direntry(&mut self, sid: usize) {
+    fn load_direntry(&mut self, sid: usize) -> usize {
         assert!(sid < self.direntries.len());
-        match self.direntries[sid] {
-            None => {
-                let start = sid * 128;
-                let entry = &self.directory_fp.stream[start..(start + 128)];
-                self.direntries[sid] = Some(OleDirentry::new(
-                    entry.try_into().unwrap(),
-                    sid,
-                    // self.sector_size,
-                    // self.header.mini_stream_cutoff_size,
-                    self,
-                ));
-            }
-            Some(_) => panic!("double reference for OLE stream/storage"),
+        if self.direntries[sid].used {
+            panic!("double reference for OLE stream/storage");
+        } else {
+            let start = sid * 128;
+            let entry = &self.directory_fp.stream[start..(start + 128)];
+            let direntry = OleDirentry::new(entry.try_into().unwrap(), sid, self);
+            self.direntries[sid] = direntry;
+            return sid;
         }
     }
 
-    fn open_helper(&mut self, start: u32, size: u32, force_fat: bool) -> OleStream {
-        if size < self.header.mini_stream_cutoff_size && !force_fat {
-            // TODO finish
-            panic!("unreachable");
+    fn load_minifat(&mut self) {
+        // MiniFAT is stored in a standard  sub-stream, pointed to by a header
+        // field.
+        // NOTE: there are two sizes to take into account for this stream:
+        // 1) Stream size is calculated according to the number of sectors
+        //    declared in the OLE header. This allocated stream may be more than
+        //    needed to store the actual sector indexes.
+        // (self.num_mini_fat_sectors is the number of sectors of size self.sector_size)
+        let stream_size = (self.header.num_mini_fat_sectors * self.sector_size) as u64;
+        // 2) Actually used size is calculated by dividing the MiniStream size
+        //    (given by root entry size) by the size of mini sectors, *4 for
+        //    32 bits indexes:
+        let nb_minisectors = (self.direntries[self.root_sid].size + self.mini_sector_size as u64
+            - 1)
+            / self.mini_sector_size as u64;
+        let _used_size = nb_minisectors * 4;
+
+        // This is not really a problem, but may indicate a wrong implementation:
+        // assert!(used_size <= stream_size);
+
+        let s = self.open_helper(self.header.first_mini_fat_sector, stream_size, true);
+        self.minifat = sect_to_array(&s.stream).to_vec();
+        self.minifat = self.minifat[..nb_minisectors as usize].to_vec();
+    }
+
+    fn open_helper(&mut self, start: u32, size: u64, force_fat: bool) -> OleStream {
+        if size < self.header.mini_stream_cutoff_size as u64 && !force_fat {
+            if self.ministream.is_none() {
+                self.load_minifat();
+                let size_ministream = self.direntries[self.root_sid].size;
+
+                self.ministream = Some(self.open_helper(
+                    self.direntries[self.root_sid].packed.isect_start,
+                    size_ministream,
+                    true,
+                ));
+            }
+
+            let mut olestream = OleStream::new(start, size, 0, self.mini_sector_size);
+            olestream.init(&self.ministream.as_ref().unwrap().stream, &self.minifat);
+            olestream
         } else {
             let mut olestream = OleStream::new(start, size, self.sector_size, self.sector_size);
             olestream.init(&self.raw, &self.fat);
             olestream
         }
+    }
+
+    fn build_storage_tree(&mut self, direntry_ind: usize) {
+        let sid_child = self.direntries[direntry_ind].packed.sid_child;
+        if sid_child != NOSTREAM {
+            // Note from OpenOffice documentation: the safest way is to
+            // recreate the tree because some implementations may store broken
+            // red-black trees...
+            self.append_children(direntry_ind, sid_child as usize);
+        }
+    }
+
+    fn append_children(&mut self, parent_sid: usize, child_sid: usize) {
+        if child_sid as u32 == NOSTREAM {
+            return;
+        }
+        assert!(child_sid < self.direntries.len());
+
+        self.load_direntry(child_sid);
+        // now child is an OleDirentry at self.direntries[child_sid]
+        // refer by index so borrow checker isnt mad
+        assert!(!self.direntries[child_sid].used);
+
+        self.direntries[child_sid].used = true;
+        self.append_children(
+            parent_sid,
+            self.direntries[child_sid].packed.sid_left as usize,
+        );
+        let name_lower = self.direntries[child_sid].name.to_lowercase();
+
+        assert!(!self.direntries[parent_sid]
+            .children_map
+            .contains_key(&name_lower));
+
+        self.direntries[parent_sid].children.push(child_sid);
+        self.direntries[parent_sid]
+            .children_map
+            .insert(name_lower, child_sid);
+
+        self.append_children(
+            parent_sid,
+            self.direntries[child_sid].packed.sid_right as usize,
+        );
+
+        // println!(
+        //     "{:?} children: {:?}",
+        //     self.direntries[parent_sid].name, self.direntries[parent_sid].children_map
+        // );
+
+        self.build_storage_tree(child_sid);
+    }
+
+    // takes a path (e.g. [storage_1, storage_1.2, stream])
+    fn open_stream(&mut self, path: Vec<String>) -> OleStream {
+        // walk direntries red/black tree to find the right stream
+        let mut node_sid = self.root_sid;
+        for name in path {
+            node_sid = self
+                .direntries
+                .iter()
+                .position(|item| item.name.to_lowercase() == name.to_lowercase())
+                .unwrap();
+        }
+
+        assert_eq!(self.direntries[node_sid].packed.entry_type, STGTY_STREAM);
+
+        return self.open_helper(
+            self.direntries[node_sid].packed.isect_start,
+            self.direntries[node_sid].size,
+            false,
+        );
     }
 
     fn print(&self) {
@@ -250,35 +394,35 @@ impl OleFile {
 
 #[derive(Default, Debug)]
 pub struct OleStream {
+    pub stream: Vec<u8>,
     start: u32,
-    size: u32,
+    size: u64,
     offset: u32,
     sector_size: u32,
-    stream: Vec<u8>,
 }
 
 impl OleStream {
-    pub fn new(start: u32, size: u32, offset: u32, sector_size: u32) -> Self {
+    pub fn new(start: u32, size: u64, offset: u32, sector_size: u32) -> Self {
         OleStream {
+            stream: Vec::new(),
             start,
             size,
             offset,
             sector_size,
-            stream: Vec::new(),
         }
     }
 
-    fn init(&mut self, raw: &Vec<u8>, fat: &Vec<u32>) {
+    fn init(&mut self, raw: &[u8], fat: &Vec<u32>) {
         let mut unknown_size = false;
         let fat_len = fat.len() as u32;
 
-        if self.size == UNKNOWN_SIZE {
-            self.size = fat_len * self.sector_size;
+        if self.size == UNKNOWN_SIZE as u64 {
+            self.size = fat_len as u64 * self.sector_size as u64;
             unknown_size = true;
         }
 
-        let nb_sectors = (self.size + (self.sector_size - 1)) / self.sector_size;
-        assert!(nb_sectors <= fat_len);
+        let nb_sectors = (self.size + (self.sector_size as u64 - 1)) / self.sector_size as u64;
+        assert!(nb_sectors <= fat_len as u64);
         let mut sect = self.start;
         assert!(self.size != 0 || sect == ENDOFCHAIN);
 
@@ -293,31 +437,32 @@ impl OleStream {
             let sector_data = &raw[start..(start + self.sector_size as usize)];
             // TODO last sector might have less than 512/4k, so read less on index
             assert!(sector_data.len() == self.sector_size as usize || sect == (fat_len - 1));
-            data.extend_from_slice(&sector_data);
+            data.extend_from_slice(sector_data);
 
-            sect = fat[sect as usize] & 0xFFFFFFFF;
+            // labeled as JYTHON_WORKAROUND in the olefile code
+            // sect = fat[sect as usize] & 0xFFFFFFFF;
+            sect = fat[sect as usize];
         }
 
         if data.len() >= self.size as usize {
             data = data[..self.size as usize].to_vec();
         } else if unknown_size {
-            self.size = data.len() as u32;
+            self.size = data.len() as u64;
         } else {
             panic!("read less than expected");
         }
-        // println!(
-        //     "data entries: {:?} {:?} {:?} {:?} {:?} {:?}",
-        //     data[0], data[1], data[2], data[3], data[4], data[5]
-        // );
-        // println!("data len: {:?}", data.len());
+
         self.stream = data;
     }
 }
 
-#[derive(PackedStruct, Debug, Clone)]
+#[derive(PackedStruct, Derivative, Debug, Clone)]
 #[packed_struct(endian = "lsb", bit_numbering = "msb0")]
+#[derivative(Default)]
 pub struct OleDirentryPacked {
     #[packed_field(bytes = "0..=63")]
+    // workaround since Default isnt implemented for [T; >32]
+    #[derivative(Default(value = "[0; 64]"))]
     name_raw: [u8; 64],
     #[packed_field(bytes = "64..=65")]
     name_length: u16,
@@ -348,15 +493,15 @@ pub struct OleDirentryPacked {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct OleDirentry {
     packed: OleDirentryPacked,
     name: String,
     clsid: String,
     sid: usize,
     size: u64,
-    kids: Vec<OleDirentry>,
-    // kids_map: ?
+    children: Vec<usize>,
+    children_map: HashMap<String, usize>,
     sect_chain: Option<Vec<u32>>,
     used: bool,
     minifat: bool,
@@ -381,17 +526,23 @@ impl OleDirentry {
         let name_utf16: &[u16] = cast_slice(name_utf16);
         let name = String::from_utf16(name_utf16).unwrap();
 
-        let size: u64;
-        if olefile.sector_size == 512 {
-            size = packed.size_low as u64;
+        let size = if olefile.sector_size == 512 {
+            packed.size_low as u64
         } else {
-            size = packed.size_low as u64 + ((packed.size_high as u64) << 32);
-        }
+            packed.size_low as u64 + ((packed.size_high as u64) << 32)
+        };
 
         let clsid = convert_clsid(packed.clsid);
 
-        println!("Direntry name: {:?}", name);
-        println!("CLSID: {:?}", clsid);
+        println!(
+            "Direntry name: {:?}, CLSID: {:?}, size: {:?}",
+            name, clsid, size
+        );
+        println!(
+            "size_low: {:?}, size_high: {:?}",
+            packed.size_low, packed.size_high
+        );
+
         assert!(packed.entry_type != STGTY_STORAGE || size == 0);
 
         let mut minifat = false;
@@ -410,9 +561,10 @@ impl OleDirentry {
             clsid,
             sid,
             size,
-            kids: Vec::new(),
+            children: Vec::new(),
+            children_map: HashMap::new(),
             sect_chain: None,
-            used: true,
+            used: false,
             minifat,
         }
     }
@@ -426,42 +578,29 @@ fn convert_clsid(clsid: [u8; 16]) -> String {
     panic!("unimplemented convert_clsid");
 }
 
-fn validate_header(header: &OleHeader) {
-    assert_eq!(header.magic, MAGIC);
-    assert_eq!(header.clsid, ZERO_CLSID);
-    assert!(header.dll_version == 3 || header.dll_version == 4);
-    assert_eq!(header.byte_order, BYTE_ORDER);
-    assert!(header.sector_shift == 9 || header.sector_shift == 12);
-    assert!(
-        (header.dll_version == 3 && header.sector_shift == 9)
-            || (header.dll_version == 4 && header.sector_shift == 12)
-    );
-    assert_eq!(header.mini_sector_shift, 6);
-    assert_eq!(header.reserved1, 0);
-    assert_eq!(header.reserved2, 0);
-    assert!(header.dll_version == 4 || header.num_dir_sectors == 0);
-    assert_eq!(header.transaction_signature_number, 0);
-    // TODO set to 4096 if not already
-    assert_eq!(header.mini_stream_cutoff_size, 4096);
-}
-
 fn sect_to_array(sect: &[u8]) -> &[u32] {
     cast_slice(sect)
 }
 
 fn main() {
-    let filename = "testFile.docx";
-    // let filename = "../../roml/22_8_august.docx";
+    let args: Vec<String> = env::args().collect();
+    let filename = &args[1];
     let mut file = File::open(filename).unwrap();
     let mut raw: Vec<u8> = Vec::new();
 
     file.read_to_end(&mut raw).unwrap();
     println!("bytes read from {}: {:?}", filename, raw.len());
-    println!("{:?}...", &raw[..100]);
 
     let mut olefile = OleFile::new(raw);
     olefile.init();
     olefile.print();
+
+    let encryption_info = olefile.open_stream(vec!["EncryptionInfo".to_owned()]);
+
+    println!("EncryptionInfo len: {:?}", encryption_info.stream.len());
+    for i in 0..100 {
+        print!("{} ", encryption_info.stream[i]);
+    }
 
     // impl _parseinfo and _parseagile to get crypto values and type
 }

@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 packed_struct = "0.10"
 bytemuck = "1.12.3"
+derivative = "2.2.0"
