@@ -1,10 +1,14 @@
+use base64::engine::general_purpose;
 use bytemuck::cast_slice;
 use derivative::Derivative;
 use packed_struct::prelude::*;
+use quick_xml::events::Event;
+use quick_xml::reader::Reader;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
+use std::io::Cursor;
 
 // https://github.com/decalage2/olefile/blob/master/olefile/olefile.py#L207
 const MAGIC: [u8; 8] = [208, 207, 17, 224, 161, 177, 26, 225];
@@ -27,6 +31,12 @@ const STGTY_STREAM: u8 = 2;
 const STGTY_ROOT: u8 = 5;
 
 const UNKNOWN_SIZE: u32 = 0x7FFF_FFFF;
+
+const _BLOCK1: [u8; 8] = [0xFE, 0xA7, 0xD2, 0x76, 0x3B, 0x4B, 0x9E, 0x79];
+const _BLOCK2: [u8; 8] = [0xD7, 0xAA, 0x0F, 0x6D, 0x30, 0x61, 0x34, 0x4E];
+const BLOCK3: [u8; 8] = [0x14, 0x6E, 0x0B, 0xE7, 0xAB, 0xAC, 0xD0, 0xD6];
+const _BLOCK4: [u8; 8] = [0x5F, 0xB2, 0xAD, 0x01, 0x0C, 0xB9, 0xE1, 0xF6];
+const _BLOCK5: [u8; 8] = [0xA0, 0x67, 0x7F, 0x02, 0xB2, 0x2C, 0x84, 0x33];
 
 // little-endian
 #[derive(PackedStruct)]
@@ -91,7 +101,6 @@ impl OleHeader {
     }
 }
 
-#[allow(dead_code)]
 pub struct OleFile {
     raw: Vec<u8>,
     header: OleHeader,
@@ -145,7 +154,7 @@ impl OleFile {
         let mut raw: Vec<u8> = Vec::new();
         file.read_to_end(&mut raw).unwrap();
 
-        return OleFile::new(raw);
+        OleFile::new(raw)
     }
 
     pub fn init(&mut self) {
@@ -226,7 +235,7 @@ impl OleFile {
             let entry = &self.directory_fp.stream[start..(start + 128)];
             let direntry = OleDirentry::new(entry.try_into().unwrap(), sid, self);
             self.direntries[sid] = direntry;
-            return sid;
+            sid
         }
     }
 
@@ -342,11 +351,11 @@ impl OleFile {
 
         assert_eq!(self.direntries[node_sid].packed.entry_type, STGTY_STREAM);
 
-        return self.open_helper(
+        self.open_helper(
             self.direntries[node_sid].packed.isect_start,
             self.direntries[node_sid].size,
             false,
-        );
+        )
     }
 
     fn print(&self) {
@@ -582,6 +591,164 @@ fn sect_to_array(sect: &[u8]) -> &[u32] {
     cast_slice(sect)
 }
 
+fn b64_decode(bytes: &[u8]) -> Vec<u8> {
+    let mut wrapped_reader = Cursor::new(bytes);
+    let mut decoder =
+        base64::read::DecoderReader::new(&mut wrapped_reader, &general_purpose::STANDARD);
+
+    let mut result = Vec::new();
+    decoder.read_to_end(&mut result).unwrap();
+    result
+}
+
+#[allow(dead_code)]
+#[derive(Default, Debug)]
+pub struct AgileEncryptionInfo {
+    key_data_salt: Vec<u8>,
+    key_data_hash_algorithm: String,
+    key_data_block_size: u32,
+    encrypted_hmac_key: Vec<u8>,
+    encrypted_hmac_value: Vec<u8>,
+    encrypted_verifier_hash_input: Vec<u8>,
+    encrypted_verifier_hash_value: Vec<u8>,
+    encrypted_key_value: Vec<u8>,
+    spin_count: u32,
+    password_salt: Vec<u8>,
+    password_hash_algorithm: String,
+    password_key_bits: u32,
+}
+
+impl AgileEncryptionInfo {
+    pub fn from_agile_info(encryption_info: &OleStream) -> Self {
+        assert_eq!(encryption_info.stream[..4], [4, 0, 4, 0]);
+
+        let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec()).unwrap();
+
+        let mut reader = Reader::from_str(&raw_xml);
+        reader.trim_text(true);
+
+        let mut aei = Self::default();
+        let mut set_key_data = false;
+        let mut set_hmac_data = false;
+        let mut set_password_node = false;
+
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Empty(e) => match e.name().as_ref() {
+                    b"keyData" if !set_key_data => {
+                        for attr in e.attributes() {
+                            let attr = attr.unwrap();
+                            match attr.key.as_ref() {
+                                b"saltValue" => {
+                                    aei.key_data_salt = b64_decode(&attr.value);
+                                }
+                                b"hashAlgorithm" => {
+                                    aei.key_data_hash_algorithm =
+                                        String::from_utf8(attr.value.into_owned()).unwrap();
+                                }
+                                b"blockSize" => {
+                                    aei.key_data_block_size =
+                                        String::from_utf8(attr.value.into_owned())
+                                            .unwrap()
+                                            .parse()
+                                            .unwrap();
+                                }
+                                _ => (),
+                            }
+                        }
+                        set_key_data = true;
+                    }
+                    b"dataIntegrity" if !set_hmac_data => {
+                        for attr in e.attributes() {
+                            let attr = attr.unwrap();
+                            match attr.key.as_ref() {
+                                b"encryptedHmacKey" => {
+                                    aei.encrypted_hmac_key = b64_decode(&attr.value);
+                                }
+                                b"encryptedHmacValue" => {
+                                    aei.encrypted_hmac_value = b64_decode(&attr.value);
+                                }
+                                _ => (),
+                            }
+                        }
+                        set_hmac_data = true;
+                    }
+                    b"p:encryptedKey" if !set_password_node => {
+                        for attr in e.attributes() {
+                            let attr = attr.unwrap();
+                            match attr.key.as_ref() {
+                                b"encryptedVerifierHashInput" => {
+                                    aei.encrypted_verifier_hash_input = b64_decode(&attr.value);
+                                }
+                                b"encryptedVerifierHashValue" => {
+                                    aei.encrypted_verifier_hash_value = b64_decode(&attr.value);
+                                }
+                                b"encryptedKeyValue" => {
+                                    aei.encrypted_key_value = b64_decode(&attr.value);
+                                }
+                                b"spinCount" => {
+                                    aei.spin_count = String::from_utf8(attr.value.into_owned())
+                                        .unwrap()
+                                        .parse()
+                                        .unwrap();
+                                }
+                                b"saltValue" => {
+                                    aei.password_salt = b64_decode(&attr.value);
+                                }
+                                b"hashAlgorithm" => {
+                                    aei.password_hash_algorithm =
+                                        String::from_utf8(attr.value.into_owned()).unwrap();
+                                }
+                                b"keyBits" => {
+                                    aei.password_key_bits =
+                                        String::from_utf8(attr.value.into_owned())
+                                            .unwrap()
+                                            .parse()
+                                            .unwrap();
+                                }
+                                _ => (),
+                            }
+                        }
+                        set_password_node = true;
+                    }
+                    _ => (),
+                },
+                Event::Eof => break,
+                _ => (),
+            }
+        }
+
+        assert!(set_key_data);
+        assert!(set_hmac_data);
+        assert!(set_password_node);
+
+        aei
+    }
+
+    // returns the digest
+    fn iterated_hash_from_password(&self, password: &str) -> Vec<u8> {
+        return Vec::new();
+    }
+
+    fn encryption_key(&self, digest: &[u8], block: &[u8]) -> Vec<u8> {
+        return Vec::new();
+    }
+
+    fn decrypt_aes_cbc(&self, encryption_key: &[u8]) -> Vec<u8> {
+        return Vec::new();
+    }
+
+    fn key_from_password(&self, password: &str) -> Vec<u8> {
+        // h = ECMA376Agile._derive_iterated_hash_from_password(password, saltValue, hashAlgorithm, spinValue)
+        // encryption_key = ECMA376Agile._derive_encryption_key(h.digest(), block3, hashAlgorithm, keyBits)
+        // skey = _decrypt_aes_cbc(encryptedKeyValue, encryption_key, saltValue)
+
+        let digest = self.iterated_hash_from_password(password);
+        let encryption_key = self.encryption_key(&digest, &BLOCK3);
+        self.decrypt_aes_cbc(&encryption_key)
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let filename = &args[1];
@@ -595,12 +762,16 @@ fn main() {
     olefile.init();
     olefile.print();
 
-    let encryption_info = olefile.open_stream(vec!["EncryptionInfo".to_owned()]);
+    let encryption_info_stream = olefile.open_stream(vec!["EncryptionInfo".to_owned()]);
 
-    println!("EncryptionInfo len: {:?}", encryption_info.stream.len());
-    for i in 0..100 {
-        print!("{} ", encryption_info.stream[i]);
-    }
+    println!(
+        "EncryptionInfo len: {:?}",
+        encryption_info_stream.stream.len()
+    );
 
-    // impl _parseinfo and _parseagile to get crypto values and type
+    let aei = AgileEncryptionInfo::from_agile_info(&encryption_info_stream);
+    println!("\n{:?}", aei);
+
+    let secret_key = aei.key_from_password("testPassword");
+    println!("secret_key: {:?}", secret_key);
 }
