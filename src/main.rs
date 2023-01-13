@@ -4,6 +4,12 @@ use derivative::Derivative;
 use packed_struct::prelude::*;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+// name conflict with sha2::Digest
+// use sha1::{Digest, Sha1};
+use aes::cipher::{
+    generic_array::typenum, generic_array::GenericArray, BlockDecryptMut, KeyIvInit,
+};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -623,6 +629,7 @@ impl AgileEncryptionInfo {
         assert_eq!(encryption_info.stream[..4], [4, 0, 4, 0]);
 
         let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec()).unwrap();
+        println!("Raw XML: {}", raw_xml);
 
         let mut reader = Reader::from_str(&raw_xml);
         reader.trim_text(true);
@@ -725,27 +732,100 @@ impl AgileEncryptionInfo {
         aei
     }
 
-    // returns the digest
+    pub fn key_from_password(&self, password: &str) -> Vec<u8> {
+        println!("----------------");
+        let digest = self.iterated_hash_from_password(password);
+        println!("Iterated Hash: {:?}", digest);
+        let encryption_key = self.encryption_key(&digest, &BLOCK3);
+        println!("Encryption Key: {:?}", encryption_key);
+        self.decrypt_aes_cbc(&encryption_key)
+    }
+
+    // this function is ridiculously expensive as it usually runs 10000 SHA512's
     fn iterated_hash_from_password(&self, password: &str) -> Vec<u8> {
-        return Vec::new();
+        let pass_utf16: Vec<u16> = password.encode_utf16().collect();
+        let pass_utf16: &[u8] = unsafe { pass_utf16.align_to::<u8>().1 };
+        let salted: Vec<u8> = [&self.password_salt, pass_utf16].concat();
+        // TODO rewrite and pass ShaXXX:digest() as param?
+        // but digest() returns GenericArray<u8, OutputSize> where OutputSize is like sha2::U64, which is private
+        // also diff hash functions may have diff output sizes
+        match self.password_hash_algorithm.as_str() {
+            "SHA512" => {
+                let mut h = Sha512::digest(salted);
+                for i in 0u32..self.spin_count {
+                    h = Sha512::digest([&i.to_le_bytes(), h.as_slice()].concat());
+                }
+
+                h.as_slice().to_owned()
+            }
+            "SHA384" => {
+                let mut h = Sha384::digest(salted);
+                for i in 0u32..self.spin_count {
+                    h = Sha384::digest([&i.to_le_bytes(), h.as_slice()].concat());
+                }
+
+                h.as_slice().to_owned()
+            }
+            "SHA256" => {
+                let mut h = Sha256::digest(salted);
+                for i in 0u32..self.spin_count {
+                    h = Sha256::digest([&i.to_le_bytes(), h.as_slice()].concat());
+                }
+
+                h.as_slice().to_owned()
+            }
+            _ => {
+                panic!("unknown hash function: {}", self.password_hash_algorithm)
+            }
+        }
     }
 
     fn encryption_key(&self, digest: &[u8], block: &[u8]) -> Vec<u8> {
-        return Vec::new();
+        match self.password_hash_algorithm.as_str() {
+            "SHA512" => {
+                let h = Sha512::digest([digest, block].concat());
+                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
+            }
+            "SHA384" => {
+                let h = Sha384::digest([digest, block].concat());
+                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
+            }
+            "SHA256" => {
+                let h = Sha256::digest([digest, block].concat());
+                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
+            }
+            _ => {
+                panic!("unknown hash function: {}", self.password_hash_algorithm)
+            }
+        }
     }
 
-    fn decrypt_aes_cbc(&self, encryption_key: &[u8]) -> Vec<u8> {
-        return Vec::new();
-    }
+    fn decrypt_aes_cbc(&self, key: &[u8]) -> Vec<u8> {
+        let mut cbc_cipher =
+            cbc::Decryptor::<aes::Aes256>::new(key.into(), self.password_salt.as_slice().into());
 
-    fn key_from_password(&self, password: &str) -> Vec<u8> {
-        // h = ECMA376Agile._derive_iterated_hash_from_password(password, saltValue, hashAlgorithm, spinValue)
-        // encryption_key = ECMA376Agile._derive_encryption_key(h.digest(), block3, hashAlgorithm, keyBits)
-        // skey = _decrypt_aes_cbc(encryptedKeyValue, encryption_key, saltValue)
+        // two 16-byte cbc blocks
+        let i1: GenericArray<u8, typenum::consts::U16> =
+            GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[..16]);
+        let i2: GenericArray<u8, typenum::consts::U16> =
+            GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[16..]);
+        let mut ciphertext_blocks = [i1, i2];
 
-        let digest = self.iterated_hash_from_password(password);
-        let encryption_key = self.encryption_key(&digest, &BLOCK3);
-        self.decrypt_aes_cbc(&encryption_key)
+        let o1: GenericArray<u8, typenum::consts::U16> = GenericArray::default();
+        let o2: GenericArray<u8, typenum::consts::U16> = GenericArray::default();
+        let mut plaintext_blocks = [o1, o2];
+
+        cbc_cipher
+            .decrypt_blocks_b2b_mut(&mut ciphertext_blocks, &mut plaintext_blocks)
+            .unwrap();
+
+        let plaintext = [
+            plaintext_blocks[0].as_slice(),
+            plaintext_blocks[1].as_slice(),
+        ]
+        .concat();
+
+        plaintext
     }
 }
 
@@ -773,5 +853,5 @@ fn main() {
     println!("\n{:?}", aei);
 
     let secret_key = aei.key_from_password("testPassword");
-    println!("secret_key: {:?}", secret_key);
+    println!("Secret Key: {:?}", secret_key);
 }
