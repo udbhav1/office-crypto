@@ -7,7 +7,8 @@ use quick_xml::reader::Reader;
 // name conflict with sha2::Digest
 // use sha1::{Digest, Sha1};
 use aes::cipher::{
-    generic_array::typenum, generic_array::GenericArray, BlockDecryptMut, KeyIvInit,
+    block_padding::NoPadding, generic_array::typenum::consts::U16, generic_array::GenericArray,
+    BlockDecryptMut, KeyIvInit,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::collections::HashMap;
@@ -26,23 +27,26 @@ const FATSECT: u32 = 0xFFFF_FFFD;
 const ENDOFCHAIN: u32 = 0xFFFF_FFFE;
 const FREESECT: u32 = 0xFFFF_FFFF;
 
-// const MAXREGSID: u32 = 0xFFFF_FFFA;
+const _MAXREGSID: u32 = 0xFFFF_FFFA;
 const NOSTREAM: u32 = 0xFFFF_FFFF;
 
 const STGTY_EMPTY: u8 = 0;
 const STGTY_STORAGE: u8 = 1;
 const STGTY_STREAM: u8 = 2;
-// const STGTY_LOCKBYTES: u8 = 3;
-// const STGTY_PROPERTY: u8 = 4;
+const _STGTY_LOCKBYTES: u8 = 3;
+const _STGTY_PROPERTY: u8 = 4;
 const STGTY_ROOT: u8 = 5;
 
 const UNKNOWN_SIZE: u32 = 0x7FFF_FFFF;
 
+// unused blocks are meant to verify password/file integrity
 const _BLOCK1: [u8; 8] = [0xFE, 0xA7, 0xD2, 0x76, 0x3B, 0x4B, 0x9E, 0x79];
 const _BLOCK2: [u8; 8] = [0xD7, 0xAA, 0x0F, 0x6D, 0x30, 0x61, 0x34, 0x4E];
 const BLOCK3: [u8; 8] = [0x14, 0x6E, 0x0B, 0xE7, 0xAB, 0xAC, 0xD0, 0xD6];
 const _BLOCK4: [u8; 8] = [0x5F, 0xB2, 0xAD, 0x01, 0x0C, 0xB9, 0xE1, 0xF6];
 const _BLOCK5: [u8; 8] = [0xA0, 0x67, 0x7F, 0x02, 0xB2, 0x2C, 0x84, 0x33];
+
+const SEGMENT_LENGTH: usize = 4096;
 
 // little-endian
 #[derive(PackedStruct)]
@@ -246,23 +250,23 @@ impl OleFile {
     }
 
     fn load_minifat(&mut self) {
-        // MiniFAT is stored in a standard  sub-stream, pointed to by a header
+        // "MiniFAT is stored in a standard  sub-stream, pointed to by a header
         // field.
         // NOTE: there are two sizes to take into account for this stream:
         // 1) Stream size is calculated according to the number of sectors
         //    declared in the OLE header. This allocated stream may be more than
         //    needed to store the actual sector indexes.
         // (self.num_mini_fat_sectors is the number of sectors of size self.sector_size)
-        let stream_size = (self.header.num_mini_fat_sectors * self.sector_size) as u64;
         // 2) Actually used size is calculated by dividing the MiniStream size
         //    (given by root entry size) by the size of mini sectors, *4 for
-        //    32 bits indexes:
+        //    32 bits indexes:"
+        let stream_size = (self.header.num_mini_fat_sectors * self.sector_size) as u64;
         let nb_minisectors = (self.direntries[self.root_sid].size + self.mini_sector_size as u64
             - 1)
             / self.mini_sector_size as u64;
-        let _used_size = nb_minisectors * 4;
 
-        // This is not really a problem, but may indicate a wrong implementation:
+        // "This is not really a problem, but may indicate a wrong implementation:"
+        // let _used_size = nb_minisectors * 4;
         // assert!(used_size <= stream_size);
 
         let s = self.open_helper(self.header.first_mini_fat_sector, stream_size, true);
@@ -296,9 +300,9 @@ impl OleFile {
     fn build_storage_tree(&mut self, direntry_ind: usize) {
         let sid_child = self.direntries[direntry_ind].packed.sid_child;
         if sid_child != NOSTREAM {
-            // Note from OpenOffice documentation: the safest way is to
+            // "Note from OpenOffice documentation: the safest way is to
             // recreate the tree because some implementations may store broken
-            // red-black trees...
+            // red-black trees..."
             self.append_children(direntry_ind, sid_child as usize);
         }
     }
@@ -311,7 +315,7 @@ impl OleFile {
 
         self.load_direntry(child_sid);
         // now child is an OleDirentry at self.direntries[child_sid]
-        // refer by index so borrow checker isnt mad
+        // refer by index so borrow checker stays happy
         assert!(!self.direntries[child_sid].used);
 
         self.direntries[child_sid].used = true;
@@ -334,11 +338,6 @@ impl OleFile {
             parent_sid,
             self.direntries[child_sid].packed.sid_right as usize,
         );
-
-        // println!(
-        //     "{:?} children: {:?}",
-        //     self.direntries[parent_sid].name, self.direntries[parent_sid].children_map
-        // );
 
         self.build_storage_tree(child_sid);
     }
@@ -548,16 +547,6 @@ impl OleDirentry {
         };
 
         let clsid = convert_clsid(packed.clsid);
-
-        println!(
-            "Direntry name: {:?}, CLSID: {:?}, size: {:?}",
-            name, clsid, size
-        );
-        println!(
-            "size_low: {:?}, size_high: {:?}",
-            packed.size_low, packed.size_high
-        );
-
         assert!(packed.entry_type != STGTY_STORAGE || size == 0);
 
         let mut minifat = false;
@@ -629,6 +618,7 @@ impl AgileEncryptionInfo {
         assert_eq!(encryption_info.stream[..4], [4, 0, 4, 0]);
 
         let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec()).unwrap();
+        #[cfg(debug_assertions)]
         println!("Raw XML: {}", raw_xml);
 
         let mut reader = Reader::from_str(&raw_xml);
@@ -733,12 +723,74 @@ impl AgileEncryptionInfo {
     }
 
     pub fn key_from_password(&self, password: &str) -> Vec<u8> {
-        println!("----------------");
         let digest = self.iterated_hash_from_password(password);
+        #[cfg(debug_assertions)]
         println!("Iterated Hash: {:?}", digest);
         let encryption_key = self.encryption_key(&digest, &BLOCK3);
+        #[cfg(debug_assertions)]
         println!("Encryption Key: {:?}", encryption_key);
         self.decrypt_aes_cbc(&encryption_key)
+    }
+
+    pub fn decrypt(&self, key: &[u8], encrypted_stream: &OleStream) -> Vec<u8> {
+        let total_size =
+            u32::from_le_bytes(encrypted_stream.stream[..4].try_into().unwrap()) as usize;
+        let mut block_start: usize = 8; // skip first 8 bytes
+        let mut block_index: u32 = 0;
+        let mut decrypted: Vec<u8> = vec![0; total_size];
+        #[cfg(debug_assertions)]
+        println!("Total Size: {:?}", total_size);
+        let key_data_salt: &[u8] = &self.key_data_salt;
+        match self.key_data_hash_algorithm.as_str() {
+            "SHA512" => {
+                while block_start < (total_size - SEGMENT_LENGTH) {
+                    let iv = Sha512::digest([key_data_salt, &block_index.to_le_bytes()].concat());
+                    let iv = &iv[..16];
+
+                    let cbc_cipher = cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into());
+
+                    // decrypt from encrypted_stream directly to output Vec
+                    cbc_cipher
+                        .decrypt_padded_b2b_mut::<NoPadding>(
+                            &encrypted_stream.stream[block_start..(block_start + SEGMENT_LENGTH)],
+                            &mut decrypted[(block_start - 8)..(block_start - 8 + SEGMENT_LENGTH)],
+                        )
+                        .unwrap();
+
+                    block_index += 1;
+                    block_start += SEGMENT_LENGTH;
+                }
+                // parse last block w less than 4096 bytes
+                let remaining = total_size - (block_start - 8);
+                let iv = Sha512::digest([key_data_salt, &block_index.to_le_bytes()].concat());
+                let iv = &iv[..16];
+
+                let cbc_cipher = cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into());
+                let irregular_block_len = remaining % 16;
+                #[cfg(debug_assertions)]
+                println!("Last Block len: {:?}", irregular_block_len);
+
+                // remaining bytes in encrypted_stream should be a multiple of block size even if we only use some of the decrypted bytes
+                let ciphertext = &encrypted_stream.stream[block_start..];
+                assert_eq!(ciphertext.len() % 16, 0);
+                let mut plaintext: Vec<u8> = vec![0; ciphertext.len()];
+                cbc_cipher
+                    .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut plaintext)
+                    .unwrap();
+
+                let copy_span = plaintext.len() - 16 + irregular_block_len;
+                decrypted[(block_start - 8)..(block_start + copy_span - 8)]
+                    .copy_from_slice(&plaintext[..copy_span]);
+            }
+            _ => {
+                panic!(
+                    "unknown key data hash function: {}",
+                    self.password_hash_algorithm
+                )
+            }
+        }
+
+        decrypted
     }
 
     // this function is ridiculously expensive as it usually runs 10000 SHA512's
@@ -747,8 +799,7 @@ impl AgileEncryptionInfo {
         let pass_utf16: &[u8] = unsafe { pass_utf16.align_to::<u8>().1 };
         let salted: Vec<u8> = [&self.password_salt, pass_utf16].concat();
         // TODO rewrite and pass ShaXXX:digest() as param?
-        // but digest() returns GenericArray<u8, OutputSize> where OutputSize is like sha2::U64, which is private
-        // also diff hash functions may have diff output sizes
+        // could maybe abstract over T: Digest but the Sha512 type alias is weird
         match self.password_hash_algorithm.as_str() {
             "SHA512" => {
                 let mut h = Sha512::digest(salted);
@@ -805,18 +856,19 @@ impl AgileEncryptionInfo {
             cbc::Decryptor::<aes::Aes256>::new(key.into(), self.password_salt.as_slice().into());
 
         // two 16-byte cbc blocks
-        let i1: GenericArray<u8, typenum::consts::U16> =
+        // TODO how does the hash func affect # of blocks?
+        let i1: GenericArray<u8, U16> =
             GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[..16]);
-        let i2: GenericArray<u8, typenum::consts::U16> =
+        let i2: GenericArray<u8, U16> =
             GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[16..]);
-        let mut ciphertext_blocks = [i1, i2];
+        let ciphertext_blocks = [i1, i2];
 
-        let o1: GenericArray<u8, typenum::consts::U16> = GenericArray::default();
-        let o2: GenericArray<u8, typenum::consts::U16> = GenericArray::default();
+        let o1: GenericArray<u8, U16> = GenericArray::default();
+        let o2: GenericArray<u8, U16> = GenericArray::default();
         let mut plaintext_blocks = [o1, o2];
 
         cbc_cipher
-            .decrypt_blocks_b2b_mut(&mut ciphertext_blocks, &mut plaintext_blocks)
+            .decrypt_blocks_b2b_mut(&ciphertext_blocks, &mut plaintext_blocks)
             .unwrap();
 
         let plaintext = [
@@ -836,22 +888,45 @@ fn main() {
     let mut raw: Vec<u8> = Vec::new();
 
     file.read_to_end(&mut raw).unwrap();
+    #[cfg(debug_assertions)]
     println!("bytes read from {}: {:?}", filename, raw.len());
 
     let mut olefile = OleFile::new(raw);
     olefile.init();
+    #[cfg(debug_assertions)]
     olefile.print();
 
     let encryption_info_stream = olefile.open_stream(vec!["EncryptionInfo".to_owned()]);
 
+    #[cfg(debug_assertions)]
     println!(
         "EncryptionInfo len: {:?}",
         encryption_info_stream.stream.len()
     );
 
     let aei = AgileEncryptionInfo::from_agile_info(&encryption_info_stream);
+    #[cfg(debug_assertions)]
     println!("\n{:?}", aei);
 
+    #[cfg(debug_assertions)]
+    println!("----------------");
     let secret_key = aei.key_from_password("testPassword");
+    #[cfg(debug_assertions)]
     println!("Secret Key: {:?}", secret_key);
+
+    let encrypted_package_stream = olefile.open_stream(vec!["EncryptedPackage".to_owned()]);
+    #[cfg(debug_assertions)]
+    println!(
+        "\nEncryptedPackage len: {:?}",
+        encrypted_package_stream.size
+    );
+
+    let decrypted: Vec<u8> = aei.decrypt(&secret_key, &encrypted_package_stream);
+    #[cfg(debug_assertions)]
+    println!("Decrypted len: {:?}", decrypted.len());
+    #[cfg(debug_assertions)]
+    println!(
+        "Last 50 bytes of decrypted: {:?}",
+        &decrypted[(decrypted.len() - 50)..]
+    );
 }
