@@ -10,7 +10,8 @@ use aes::cipher::{
     block_padding::NoPadding, generic_array::typenum::consts::U16, generic_array::GenericArray,
     BlockDecryptMut, KeyIvInit,
 };
-use sha2::{Digest, Sha256, Sha384, Sha512};
+use docx::DocxFile;
+use sha2::{Digest, Sha512};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -194,11 +195,8 @@ impl OleFile {
         }
     }
 
-    fn load_fat_sect(&mut self, sect_start: usize, sect_end: usize) {
-        let sect = &self.raw[sect_start..sect_end];
-        let fat1: &[u32] = sect_to_array(sect);
-
-        for isect in fat1 {
+    fn load_fat_sect(&mut self, sect: &[u32]) {
+        for isect in sect {
             // labeled as JYTHON-WORKAROUND in the olefile code
             // let isect = isect & 0xFFFFFFFF;
             let isect = *isect;
@@ -213,13 +211,40 @@ impl OleFile {
         }
     }
 
+    fn load_fat_sect_range(&mut self, sect_start: usize, sect_end: usize) {
+        let sect = &self.raw[sect_start..sect_end].to_owned();
+        let fat1: &[u32] = sect_to_array(&sect);
+        self.load_fat_sect(fat1);
+    }
+
     fn load_fat(&mut self) {
-        self.load_fat_sect(76, 512);
+        self.load_fat_sect_range(76, 512);
+        // "There's a DIFAT because file is larger than 6.8MB"
         if self.header.num_difat_sectors > 0 {
             assert!(self.header.num_fat_sectors > 109);
             assert!(self.header.first_difat_sector < self.nb_sect);
-            // TODO finish
-            panic!("unimplemented num_difat_sectors > 0");
+            // "We compute the necessary number of DIFAT sectors :
+            // Number of pointers per DIFAT sector = (sectorsize/4)-1
+            // (-1 because the last pointer is the next DIFAT sector number)"
+            let nb_difat_sectors = (self.sector_size / 4) - 1;
+            // "(if 512 bytes: each DIFAT sector = 127 pointers + 1 towards next DIFAT sector)"
+            let nb_difat =
+                (self.header.num_fat_sectors - 109 + nb_difat_sectors - 1) / nb_difat_sectors;
+            assert_eq!(self.header.num_difat_sectors, nb_difat);
+            let mut isect_difat = self.header.first_difat_sector;
+
+            for _ in 0..nb_difat {
+                let start = ((self.sector_size) * (isect_difat + 1)) as usize;
+                let sector_difat = self.raw[start..(start + self.sector_size as usize)].to_owned();
+                let difat = sect_to_array(&sector_difat).clone();
+
+                self.load_fat_sect(&difat[..(nb_difat_sectors as usize)]);
+                isect_difat = difat[nb_difat_sectors as usize];
+            }
+
+            assert!([ENDOFCHAIN, FREESECT].contains(&isect_difat));
+
+            // panic!("unimplemented num_difat_sectors > 0");
         }
 
         if self.fat.len() as u32 > self.nb_sect {
@@ -343,7 +368,7 @@ impl OleFile {
     }
 
     // takes a path (e.g. [storage_1, storage_1.2, stream])
-    fn open_stream(&mut self, path: Vec<String>) -> OleStream {
+    fn open_stream(&mut self, path: &[String]) -> OleStream {
         // walk direntries red/black tree to find the right stream
         let mut node_sid = self.root_sid;
         for name in path {
@@ -809,22 +834,6 @@ impl AgileEncryptionInfo {
 
                 h.as_slice().to_owned()
             }
-            "SHA384" => {
-                let mut h = Sha384::digest(salted);
-                for i in 0u32..self.spin_count {
-                    h = Sha384::digest([&i.to_le_bytes(), h.as_slice()].concat());
-                }
-
-                h.as_slice().to_owned()
-            }
-            "SHA256" => {
-                let mut h = Sha256::digest(salted);
-                for i in 0u32..self.spin_count {
-                    h = Sha256::digest([&i.to_le_bytes(), h.as_slice()].concat());
-                }
-
-                h.as_slice().to_owned()
-            }
             _ => {
                 panic!("unknown hash function: {}", self.password_hash_algorithm)
             }
@@ -835,14 +844,6 @@ impl AgileEncryptionInfo {
         match self.password_hash_algorithm.as_str() {
             "SHA512" => {
                 let h = Sha512::digest([digest, block].concat());
-                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
-            }
-            "SHA384" => {
-                let h = Sha384::digest([digest, block].concat());
-                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
-            }
-            "SHA256" => {
-                let h = Sha256::digest([digest, block].concat());
                 h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
             }
             _ => {
@@ -896,7 +897,7 @@ fn main() {
     #[cfg(debug_assertions)]
     olefile.print();
 
-    let encryption_info_stream = olefile.open_stream(vec!["EncryptionInfo".to_owned()]);
+    let encryption_info_stream = olefile.open_stream(&["EncryptionInfo".to_owned()]);
 
     #[cfg(debug_assertions)]
     println!(
@@ -914,7 +915,7 @@ fn main() {
     #[cfg(debug_assertions)]
     println!("Secret Key: {:?}", secret_key);
 
-    let encrypted_package_stream = olefile.open_stream(vec!["EncryptedPackage".to_owned()]);
+    let encrypted_package_stream = olefile.open_stream(&["EncryptedPackage".to_owned()]);
     #[cfg(debug_assertions)]
     println!(
         "\nEncryptedPackage len: {:?}",
@@ -929,4 +930,15 @@ fn main() {
         "Last 50 bytes of decrypted: {:?}",
         &decrypted[(decrypted.len() - 50)..]
     );
+
+    let docx = DocxFile::from_reader(Cursor::new(decrypted)).unwrap();
+    let docx = docx.parse().unwrap();
+    for field in docx.document.body.content {
+        match field {
+            docx::document::BodyContent::Paragraph(para) => {
+                print!("{:?}", para.content)
+            }
+            _ => (),
+        }
+    }
 }
