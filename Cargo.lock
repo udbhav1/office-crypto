@@ -200,21 +200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "docx-decrypt"
-version = "0.1.0"
-dependencies = [
- "aes",
- "base64",
- "bytemuck",
- "cbc",
- "derivative",
- "docx",
- "packed_struct",
- "quick-xml",
- "sha2",
-]
-
-[[package]]
 name = "flate2"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -290,6 +275,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b275950c28b37e794e8c55d88aeb5e139d0ce23fdbbeda68f8d7174abdf9e8fa"
 dependencies = [
  "adler",
+]
+
+[[package]]
+name = "office-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "base64",
+ "bytemuck",
+ "cbc",
+ "derivative",
+ "docx",
+ "packed_struct",
+ "quick-xml",
+ "sha2",
 ]
 
 [[package]]
