@@ -7,7 +7,7 @@ use office_crypto::decrypt_from_file;
 fn main() {
     let args: Vec<String> = env::args().collect();
     let filename = &args[1];
-    let decrypted = decrypt_from_file(filename, "testPassword");
+    let decrypted = decrypt_from_file(filename, "testPassword").unwrap();
     println!("decrypted len: {}", decrypted.len());
 
     let docx = DocxFile::from_reader(Cursor::new(decrypted)).unwrap();

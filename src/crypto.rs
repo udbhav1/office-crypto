@@ -1,4 +1,6 @@
 use crate::ole::OleStream;
+use crate::validate;
+use crate::DecryptError::{self, *};
 
 use aes::cipher::{
     block_padding::NoPadding, generic_array::typenum::consts::U16, generic_array::GenericArray,
@@ -38,10 +40,14 @@ pub(crate) struct AgileEncryptionInfo {
 }
 
 impl AgileEncryptionInfo {
-    pub fn from_agile_info(encryption_info: &OleStream) -> Self {
-        assert_eq!(encryption_info.stream[..4], [4, 0, 4, 0]);
+    pub fn from_agile_info(encryption_info: &OleStream) -> Result<Self, DecryptError> {
+        validate!(
+            encryption_info.stream[..4] == [4, 0, 4, 0],
+            InvalidStructure
+        )?;
 
-        let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec()).unwrap();
+        let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec())
+            .map_err(|_| InvalidStructure)?;
         #[cfg(debug_assertions)]
         println!("Raw XML: {}", raw_xml);
 
@@ -58,21 +64,22 @@ impl AgileEncryptionInfo {
                 Event::Empty(e) => match e.name().as_ref() {
                     b"keyData" if !set_key_data => {
                         for attr in e.attributes() {
-                            let attr = attr.unwrap();
+                            let attr = attr.map_err(|_| InvalidStructure)?;
                             match attr.key.as_ref() {
                                 b"saltValue" => {
-                                    aei.key_data_salt = b64_decode(&attr.value);
+                                    aei.key_data_salt = b64_decode(&attr.value)?;
                                 }
                                 b"hashAlgorithm" => {
                                     aei.key_data_hash_algorithm =
-                                        String::from_utf8(attr.value.into_owned()).unwrap();
+                                        String::from_utf8(attr.value.into_owned())
+                                            .map_err(|_| InvalidStructure)?;
                                 }
                                 b"blockSize" => {
                                     aei.key_data_block_size =
                                         String::from_utf8(attr.value.into_owned())
-                                            .unwrap()
+                                            .map_err(|_| InvalidStructure)?
                                             .parse()
-                                            .unwrap();
+                                            .map_err(|_| InvalidStructure)?;
                                 }
                                 _ => (),
                             }
@@ -81,13 +88,13 @@ impl AgileEncryptionInfo {
                     }
                     b"dataIntegrity" if !set_hmac_data => {
                         for attr in e.attributes() {
-                            let attr = attr.unwrap();
+                            let attr = attr.map_err(|_| InvalidStructure)?;
                             match attr.key.as_ref() {
                                 b"encryptedHmacKey" => {
-                                    aei.encrypted_hmac_key = b64_decode(&attr.value);
+                                    aei.encrypted_hmac_key = b64_decode(&attr.value)?;
                                 }
                                 b"encryptedHmacValue" => {
-                                    aei.encrypted_hmac_value = b64_decode(&attr.value);
+                                    aei.encrypted_hmac_value = b64_decode(&attr.value)?;
                                 }
                                 _ => (),
                             }
@@ -96,36 +103,37 @@ impl AgileEncryptionInfo {
                     }
                     b"p:encryptedKey" if !set_password_node => {
                         for attr in e.attributes() {
-                            let attr = attr.unwrap();
+                            let attr = attr.map_err(|_| InvalidStructure)?;
                             match attr.key.as_ref() {
                                 b"encryptedVerifierHashInput" => {
-                                    aei.encrypted_verifier_hash_input = b64_decode(&attr.value);
+                                    aei.encrypted_verifier_hash_input = b64_decode(&attr.value)?;
                                 }
                                 b"encryptedVerifierHashValue" => {
-                                    aei.encrypted_verifier_hash_value = b64_decode(&attr.value);
+                                    aei.encrypted_verifier_hash_value = b64_decode(&attr.value)?;
                                 }
                                 b"encryptedKeyValue" => {
-                                    aei.encrypted_key_value = b64_decode(&attr.value);
+                                    aei.encrypted_key_value = b64_decode(&attr.value)?;
                                 }
                                 b"spinCount" => {
                                     aei.spin_count = String::from_utf8(attr.value.into_owned())
-                                        .unwrap()
+                                        .map_err(|_| InvalidStructure)?
                                         .parse()
-                                        .unwrap();
+                                        .map_err(|_| InvalidStructure)?;
                                 }
                                 b"saltValue" => {
-                                    aei.password_salt = b64_decode(&attr.value);
+                                    aei.password_salt = b64_decode(&attr.value)?;
                                 }
                                 b"hashAlgorithm" => {
                                     aei.password_hash_algorithm =
-                                        String::from_utf8(attr.value.into_owned()).unwrap();
+                                        String::from_utf8(attr.value.into_owned())
+                                            .map_err(|_| InvalidStructure)?;
                                 }
                                 b"keyBits" => {
                                     aei.password_key_bits =
                                         String::from_utf8(attr.value.into_owned())
-                                            .unwrap()
+                                            .map_err(|_| InvalidStructure)?
                                             .parse()
-                                            .unwrap();
+                                            .map_err(|_| InvalidStructure)?;
                                 }
                                 _ => (),
                             }
@@ -139,26 +147,33 @@ impl AgileEncryptionInfo {
             }
         }
 
-        assert!(set_key_data);
-        assert!(set_hmac_data);
-        assert!(set_password_node);
+        validate!(set_key_data, InvalidStructure)?;
+        validate!(set_hmac_data, InvalidStructure)?;
+        validate!(set_password_node, InvalidStructure)?;
 
-        aei
+        Ok(aei)
     }
 
-    pub fn key_from_password(&self, password: &str) -> Vec<u8> {
-        let digest = self.iterated_hash_from_password(password);
+    pub fn key_from_password(&self, password: &str) -> Result<Vec<u8>, DecryptError> {
+        let digest = self.iterated_hash_from_password(password)?;
         #[cfg(debug_assertions)]
         println!("Iterated Hash: {:?}", digest);
-        let encryption_key = self.encryption_key(&digest, &BLOCK3);
+        let encryption_key = self.encryption_key(&digest, &BLOCK3)?;
         #[cfg(debug_assertions)]
         println!("Encryption Key: {:?}", encryption_key);
         self.decrypt_aes_cbc(&encryption_key)
     }
 
-    pub fn decrypt(&self, key: &[u8], encrypted_stream: &OleStream) -> Vec<u8> {
-        let total_size =
-            u32::from_le_bytes(encrypted_stream.stream[..4].try_into().unwrap()) as usize;
+    pub fn decrypt(
+        &self,
+        key: &[u8],
+        encrypted_stream: &OleStream,
+    ) -> Result<Vec<u8>, DecryptError> {
+        let total_size = u32::from_le_bytes(
+            encrypted_stream.stream[..4]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        ) as usize;
         let mut block_start: usize = 8; // skip first 8 bytes
         let mut block_index: u32 = 0;
         let mut decrypted: Vec<u8> = vec![0; total_size];
@@ -179,7 +194,7 @@ impl AgileEncryptionInfo {
                             &encrypted_stream.stream[block_start..(block_start + SEGMENT_LENGTH)],
                             &mut decrypted[(block_start - 8)..(block_start - 8 + SEGMENT_LENGTH)],
                         )
-                        .unwrap();
+                        .map_err(|_| InvalidStructure)?;
 
                     block_index += 1;
                     block_start += SEGMENT_LENGTH;
@@ -196,29 +211,27 @@ impl AgileEncryptionInfo {
 
                 // remaining bytes in encrypted_stream should be a multiple of block size even if we only use some of the decrypted bytes
                 let ciphertext = &encrypted_stream.stream[block_start..];
-                assert_eq!(ciphertext.len() % 16, 0);
+                validate!(ciphertext.len() % 16 == 0, InvalidStructure)?;
+
                 let mut plaintext: Vec<u8> = vec![0; ciphertext.len()];
                 cbc_cipher
                     .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut plaintext)
-                    .unwrap();
+                    .map_err(|_| InvalidStructure)?;
 
                 let copy_span = plaintext.len() - 16 + irregular_block_len;
                 decrypted[(block_start - 8)..(block_start + copy_span - 8)]
                     .copy_from_slice(&plaintext[..copy_span]);
+                Ok(decrypted)
             }
-            _ => {
-                panic!(
-                    "unknown key data hash function: {}",
-                    self.password_hash_algorithm
-                )
-            }
+            "SHA384" => Err(Unimplemented("SHA384".to_owned())),
+            "SHA256" => Err(Unimplemented("SHA256".to_owned())),
+            "SHA1" => Err(Unimplemented("SHA1".to_owned())),
+            _ => Err(InvalidStructure),
         }
-
-        decrypted
     }
 
     // this function is ridiculously expensive as it usually runs 10000 SHA512's
-    fn iterated_hash_from_password(&self, password: &str) -> Vec<u8> {
+    fn iterated_hash_from_password(&self, password: &str) -> Result<Vec<u8>, DecryptError> {
         let pass_utf16: Vec<u16> = password.encode_utf16().collect();
         let pass_utf16: &[u8] = unsafe { pass_utf16.align_to::<u8>().1 };
         let salted: Vec<u8> = [&self.password_salt, pass_utf16].concat();
@@ -231,27 +244,29 @@ impl AgileEncryptionInfo {
                     h = Sha512::digest([&i.to_le_bytes(), h.as_slice()].concat());
                 }
 
-                h.as_slice().to_owned()
+                Ok(h.as_slice().to_owned())
             }
-            _ => {
-                panic!("unknown hash function: {}", self.password_hash_algorithm)
-            }
+            "SHA384" => Err(Unimplemented("SHA384".to_owned())),
+            "SHA256" => Err(Unimplemented("SHA256".to_owned())),
+            "SHA1" => Err(Unimplemented("SHA1".to_owned())),
+            _ => Err(InvalidStructure),
         }
     }
 
-    fn encryption_key(&self, digest: &[u8], block: &[u8]) -> Vec<u8> {
+    fn encryption_key(&self, digest: &[u8], block: &[u8]) -> Result<Vec<u8>, DecryptError> {
         match self.password_hash_algorithm.as_str() {
             "SHA512" => {
                 let h = Sha512::digest([digest, block].concat());
-                h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned()
+                Ok(h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned())
             }
-            _ => {
-                panic!("unknown hash function: {}", self.password_hash_algorithm)
-            }
+            "SHA384" => Err(Unimplemented("SHA384".to_owned())),
+            "SHA256" => Err(Unimplemented("SHA256".to_owned())),
+            "SHA1" => Err(Unimplemented("SHA1".to_owned())),
+            _ => Err(InvalidStructure),
         }
     }
 
-    fn decrypt_aes_cbc(&self, key: &[u8]) -> Vec<u8> {
+    fn decrypt_aes_cbc(&self, key: &[u8]) -> Result<Vec<u8>, DecryptError> {
         let mut cbc_cipher =
             cbc::Decryptor::<aes::Aes256>::new(key.into(), self.password_salt.as_slice().into());
 
@@ -269,7 +284,7 @@ impl AgileEncryptionInfo {
 
         cbc_cipher
             .decrypt_blocks_b2b_mut(&ciphertext_blocks, &mut plaintext_blocks)
-            .unwrap();
+            .map_err(|_| Unknown)?;
 
         let plaintext = [
             plaintext_blocks[0].as_slice(),
@@ -277,16 +292,16 @@ impl AgileEncryptionInfo {
         ]
         .concat();
 
-        plaintext
+        Ok(plaintext)
     }
 }
 
-fn b64_decode(bytes: &[u8]) -> Vec<u8> {
+fn b64_decode(bytes: &[u8]) -> Result<Vec<u8>, DecryptError> {
     let mut wrapped_reader = Cursor::new(bytes);
     let mut decoder =
         base64::read::DecoderReader::new(&mut wrapped_reader, &general_purpose::STANDARD);
 
     let mut result = Vec::new();
-    decoder.read_to_end(&mut result).unwrap();
-    result
+    decoder.read_to_end(&mut result).map_err(|_| Unknown)?;
+    Ok(result)
 }

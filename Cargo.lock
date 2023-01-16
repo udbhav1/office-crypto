@@ -290,6 +290,7 @@ dependencies = [
  "packed_struct",
  "quick-xml",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
