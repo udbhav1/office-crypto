@@ -48,8 +48,6 @@ impl AgileEncryptionInfo {
 
         let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec())
             .map_err(|_| InvalidStructure)?;
-        #[cfg(debug_assertions)]
-        println!("Raw XML: {}", raw_xml);
 
         let mut reader = Reader::from_str(&raw_xml);
         reader.trim_text(true);
@@ -156,11 +154,7 @@ impl AgileEncryptionInfo {
 
     pub fn key_from_password(&self, password: &str) -> Result<Vec<u8>, DecryptError> {
         let digest = self.iterated_hash_from_password(password)?;
-        #[cfg(debug_assertions)]
-        println!("Iterated Hash: {:?}", digest);
         let encryption_key = self.encryption_key(&digest, &BLOCK3)?;
-        #[cfg(debug_assertions)]
-        println!("Encryption Key: {:?}", encryption_key);
         self.decrypt_aes_cbc(&encryption_key)
     }
 
@@ -177,9 +171,8 @@ impl AgileEncryptionInfo {
         let mut block_start: usize = 8; // skip first 8 bytes
         let mut block_index: u32 = 0;
         let mut decrypted: Vec<u8> = vec![0; total_size];
-        #[cfg(debug_assertions)]
-        println!("Total Size: {:?}", total_size);
         let key_data_salt: &[u8] = &self.key_data_salt;
+
         match self.key_data_hash_algorithm.as_str() {
             "SHA512" => {
                 while block_start < (total_size - SEGMENT_LENGTH) {
@@ -206,8 +199,6 @@ impl AgileEncryptionInfo {
 
                 let cbc_cipher = cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into());
                 let irregular_block_len = remaining % 16;
-                #[cfg(debug_assertions)]
-                println!("Last Block len: {:?}", irregular_block_len);
 
                 // remaining bytes in encrypted_stream should be a multiple of block size even if we only use some of the decrypted bytes
                 let ciphertext = &encrypted_stream.stream[block_start..];

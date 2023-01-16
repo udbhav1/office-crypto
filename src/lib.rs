@@ -1,11 +1,10 @@
 mod crypto;
 mod ole;
 
-use crypto::*;
-use ole::*;
+use crypto::AgileEncryptionInfo;
+use ole::OleFile;
 use thiserror::Error;
 
-#[macro_export]
 macro_rules! validate {
     ($assert:expr, $err:expr) => {{
         if ($assert) {
@@ -16,6 +15,8 @@ macro_rules! validate {
         }
     }};
 }
+
+pub(crate) use validate;
 
 pub fn decrypt_from_file(path: &str, password: &str) -> Result<Vec<u8>, DecryptError> {
     let mut olefile = OleFile::from_file(path)?;
