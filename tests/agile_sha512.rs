@@ -1,20 +1,29 @@
-use office_crypto::decrypt_from_file;
-use std::fs::File;
-use std::io::*;
-use std::path::PathBuf;
+use office_crypto::*;
+
+mod utils;
 
 #[test]
 fn agile_sha512() {
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.push("tests/testAgileSha512.docx");
-    let decrypted = decrypt_from_file(dir.to_str().unwrap(), "testPassword").unwrap();
+    let decrypted = decrypt_from_bytes(
+        utils::read_test_file("testAgileSha512.docx"),
+        "testPassword",
+    )
+    .unwrap();
+    let expected = utils::read_test_file("expectedAgileSha512.txt");
+    // std::fs::write("tests/files/expectedAgileSha512.txt", &decrypted).unwrap();
 
-    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.push("tests/expectedAgileSha512.txt");
-    let mut expected_file = File::open(dir).unwrap();
-    let mut expected: Vec<u8> = Vec::new();
-    expected_file.read_to_end(&mut expected).unwrap();
-    // std::fs::write(dir, &decrypted).unwrap();
+    assert!(decrypted == expected);
+}
+
+#[test]
+fn agile_sha512_large() {
+    let decrypted = decrypt_from_bytes(
+        utils::read_test_file("testAgileSha512Large.docx"),
+        "testPassword",
+    )
+    .unwrap();
+    let expected = utils::read_test_file("expectedAgileSha512Large.txt");
+    // std::fs::write("tests/files/expectedAgileSha512Large.txt", &decrypted).unwrap();
 
     assert!(decrypted == expected);
 }
