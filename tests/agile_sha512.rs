@@ -4,15 +4,24 @@ mod utils;
 
 #[test]
 fn agile_sha512() {
-    let decrypted = decrypt_from_bytes(
+    let dec_docx = decrypt_from_bytes(
         utils::read_test_file("testAgileSha512.docx"),
         "testPassword",
     )
     .unwrap();
-    let expected = utils::read_test_file("expectedAgileSha512.txt");
-    // std::fs::write("tests/files/expectedAgileSha512.txt", &decrypted).unwrap();
+    let expected_docx = utils::read_test_file("expectedAgileSha512.docx");
+    // std::fs::write("tests/files/expectedAgileSha512.docx", &dec_docx).unwrap();
 
-    assert!(decrypted == expected);
+    let dec_xlsx = decrypt_from_bytes(
+        utils::read_test_file("testAgileSha512.xlsx"),
+        "testPassword",
+    )
+    .unwrap();
+    let expected_xlsx = utils::read_test_file("expectedAgileSha512.xlsx");
+    // std::fs::write("tests/files/expectedAgileSha512.xlsx", &dec_xlsx).unwrap();
+
+    assert!(dec_docx == expected_docx);
+    assert!(dec_xlsx == expected_xlsx);
 }
 
 #[test]
@@ -22,8 +31,8 @@ fn agile_sha512_large() {
         "testPassword",
     )
     .unwrap();
-    let expected = utils::read_test_file("expectedAgileSha512Large.txt");
-    // std::fs::write("tests/files/expectedAgileSha512Large.txt", &decrypted).unwrap();
+    let expected = utils::read_test_file("expectedAgileSha512Large.docx");
+    // std::fs::write("tests/files/expectedAgileSha512Large.docx", &decrypted).unwrap();
 
     assert!(decrypted == expected);
 }
