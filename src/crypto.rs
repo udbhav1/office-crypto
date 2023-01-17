@@ -208,8 +208,10 @@ impl AgileEncryptionInfo {
                 cbc_cipher
                     .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut plaintext)
                     .map_err(|_| InvalidStructure)?;
-
-                let copy_span = plaintext.len() - 16 + irregular_block_len;
+                let mut copy_span = plaintext.len() - 16 + irregular_block_len;
+                if irregular_block_len == 0 {
+                    copy_span += 16;
+                }
                 decrypted[(block_start - 8)..(block_start + copy_span - 8)]
                     .copy_from_slice(&plaintext[..copy_span]);
                 Ok(decrypted)
