@@ -22,3 +22,10 @@ aes = "0.8.2"
 cbc = { version = "0.1.2", features = ["block-padding"] }
 docx = "1.1.2"
 thiserror = "1.0.38"
+
+[dev-dependencies]
+bencher = "0.1.5"
+
+[[bench]]
+name = "agile"
+harness = false

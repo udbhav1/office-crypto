@@ -1,0 +1,37 @@
+#[macro_use]
+extern crate bencher;
+
+use bencher::{black_box, Bencher};
+use office_crypto::decrypt_from_bytes;
+use std::fs::File;
+use std::io::*;
+use std::path::PathBuf;
+
+pub fn read_test_file(name: &str) -> Vec<u8> {
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.push("tests");
+    dir.push("files");
+    dir.push(name);
+    let mut f = File::open(dir).unwrap();
+    let mut data: Vec<u8> = Vec::new();
+    f.read_to_end(&mut data).unwrap();
+
+    data
+}
+
+fn bench_agile_sha512(b: &mut Bencher) {
+    b.iter(|| {
+        let data = read_test_file("testAgileSha512.docx");
+        black_box(decrypt_from_bytes(data, "testPassword").unwrap());
+    });
+}
+
+fn bench_agile_sha512_large(b: &mut Bencher) {
+    b.iter(|| {
+        let data = read_test_file("testAgileSha512Large.docx");
+        black_box(decrypt_from_bytes(data, "testPassword").unwrap());
+    });
+}
+
+benchmark_group!(benches, bench_agile_sha512, bench_agile_sha512_large);
+benchmark_main!(benches);
