@@ -33,5 +33,17 @@ fn bench_agile_sha512_large(b: &mut Bencher) {
     });
 }
 
-benchmark_group!(benches, bench_agile_sha512, bench_agile_sha512_large);
+fn bench_standard(b: &mut Bencher) {
+    b.iter(|| {
+        let data = read_test_file("testStandard.docx");
+        black_box(decrypt_from_bytes(data, "Password1234_").unwrap());
+    });
+}
+
+benchmark_group!(
+    benches,
+    bench_agile_sha512,
+    bench_agile_sha512_large,
+    bench_standard
+);
 benchmark_main!(benches);

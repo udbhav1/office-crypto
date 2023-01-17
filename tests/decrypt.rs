@@ -36,3 +36,14 @@ fn agile_sha512_large() {
 
     assert!(decrypted == expected);
 }
+
+#[test]
+fn standard_sha512() {
+    // from msofficecrypto tests
+    let decrypted =
+        decrypt_from_bytes(utils::read_test_file("testStandard.docx"), "Password1234_").unwrap();
+    let expected = utils::read_test_file("expectedStandard.docx");
+    // std::fs::write("tests/files/expectedStandard.docx", &decrypted).unwrap();
+
+    assert!(decrypted == expected);
+}

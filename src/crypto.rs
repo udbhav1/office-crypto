@@ -4,11 +4,12 @@ use crate::DecryptError::{self, *};
 
 use aes::cipher::{
     block_padding::NoPadding, generic_array::typenum::consts::U16, generic_array::GenericArray,
-    BlockDecryptMut, KeyIvInit,
+    BlockDecryptMut, KeyInit, KeyIvInit,
 };
 use base64::engine::general_purpose;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use sha1::Sha1;
 use sha2::{Digest, Sha512};
 use std::io::prelude::*;
 use std::io::Cursor;
@@ -21,6 +22,17 @@ const _BLOCK4: [u8; 8] = [0x5F, 0xB2, 0xAD, 0x01, 0x0C, 0xB9, 0xE1, 0xF6];
 const _BLOCK5: [u8; 8] = [0xA0, 0x67, 0x7F, 0x02, 0xB2, 0x2C, 0x84, 0x33];
 
 const SEGMENT_LENGTH: usize = 4096;
+const ITER_COUNT: u32 = 50000;
+
+fn b64_decode(bytes: &[u8]) -> Result<Vec<u8>, DecryptError> {
+    let mut wrapped_reader = Cursor::new(bytes);
+    let mut decoder =
+        base64::read::DecoderReader::new(&mut wrapped_reader, &general_purpose::STANDARD);
+
+    let mut result = Vec::new();
+    decoder.read_to_end(&mut result).map_err(|_| Unknown)?;
+    Ok(result)
+}
 
 #[allow(dead_code)]
 #[derive(Default, Debug)]
@@ -40,12 +52,7 @@ pub(crate) struct AgileEncryptionInfo {
 }
 
 impl AgileEncryptionInfo {
-    pub fn from_agile_info(encryption_info: &OleStream) -> Result<Self, DecryptError> {
-        validate!(
-            encryption_info.stream[..4] == [4, 0, 4, 0],
-            InvalidStructure
-        )?;
-
+    pub fn new(encryption_info: &OleStream) -> Result<Self, DecryptError> {
         let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec())
             .map_err(|_| InvalidStructure)?;
 
@@ -289,12 +296,160 @@ impl AgileEncryptionInfo {
     }
 }
 
-fn b64_decode(bytes: &[u8]) -> Result<Vec<u8>, DecryptError> {
-    let mut wrapped_reader = Cursor::new(bytes);
-    let mut decoder =
-        base64::read::DecoderReader::new(&mut wrapped_reader, &general_purpose::STANDARD);
+#[allow(dead_code)]
+#[derive(Default, Debug)]
+pub(crate) struct StandardEncryptionInfo {
+    flags: u32,
+    size_extra: u32,
+    alg_id: u32,
+    alg_id_hash: u32,
+    key_size: u32,
+    provider_type: u32,
+    reserved1: u32,
+    reserved2: u32,
+    csp_name: String,
+    salt_size: u32,
+    salt: Vec<u8>,
+    encrypted_verifier: Vec<u8>,
+    verifier_hash_size: u32,
+    encrypted_verifier_hash: Vec<u8>,
+}
 
-    let mut result = Vec::new();
-    decoder.read_to_end(&mut result).map_err(|_| Unknown)?;
-    Ok(result)
+impl StandardEncryptionInfo {
+    pub fn new(encryption_info: &OleStream) -> Result<Self, DecryptError> {
+        // let header_flags = u32::from_le_bytes(
+        //     encryption_info.stream[4..8]
+        //         .try_into()
+        //         .map_err(|_| InvalidStructure)?,
+        // );
+        let header_size = u32::from_le_bytes(
+            encryption_info.stream[8..12]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        let header_bytes = &encryption_info.stream[12..(12 + header_size as usize)];
+        let mut sei = Self::default();
+
+        // TODO switch to packed struct maybe
+        sei.flags = u32::from_le_bytes(header_bytes[..4].try_into().map_err(|_| InvalidStructure)?);
+        sei.size_extra = u32::from_le_bytes(
+            header_bytes[4..8]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.alg_id = u32::from_le_bytes(
+            header_bytes[8..12]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.alg_id_hash = u32::from_le_bytes(
+            header_bytes[12..16]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.key_size = u32::from_le_bytes(
+            header_bytes[16..20]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.provider_type = u32::from_le_bytes(
+            header_bytes[20..24]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.reserved1 = u32::from_le_bytes(
+            header_bytes[24..28]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.reserved2 = u32::from_le_bytes(
+            header_bytes[28..32]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+
+        let csp_utf16 = header_bytes[32..].to_owned();
+        let csp_utf16: &[u16] = unsafe { csp_utf16.align_to::<u16>().1 };
+        sei.csp_name = String::from_utf16(csp_utf16).map_err(|_| InvalidStructure)?;
+
+        // check if AES, otherwise RC4
+        validate!(
+            sei.alg_id & 0xFF00 == 0x6600,
+            Unimplemented("RC4".to_owned())
+        )?;
+
+        let verifier_bytes = &encryption_info.stream[(12 + header_size as usize)..];
+
+        sei.salt_size = u32::from_le_bytes(
+            verifier_bytes[..4]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.salt = verifier_bytes[4..20].to_owned();
+        sei.encrypted_verifier = verifier_bytes[20..36].to_owned();
+        sei.verifier_hash_size = u32::from_le_bytes(
+            verifier_bytes[36..40]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        );
+        sei.encrypted_verifier_hash = verifier_bytes[40..72].to_owned();
+
+        Ok(sei)
+    }
+
+    pub fn key_from_password(&self, password: &str) -> Result<Vec<u8>, DecryptError> {
+        let pass_utf16: Vec<u16> = password.encode_utf16().collect();
+        let pass_utf16: &[u8] = unsafe { pass_utf16.align_to::<u8>().1 };
+
+        let mut h = Sha1::digest([&self.salt, pass_utf16].concat());
+        for i in 0u32..ITER_COUNT {
+            h = Sha1::digest([&i.to_le_bytes(), h.as_slice()].concat());
+        }
+
+        let block_bytes = [0, 0, 0, 0];
+        h = Sha1::digest([h.as_slice(), &block_bytes].concat());
+        let cb_required_key_length = self.key_size / 8;
+        // let cb_hash = h.len();
+
+        let mut buf1 = [0x36_u8; 64];
+        buf1.iter_mut().zip(h.iter()).for_each(|(a, b)| *a ^= *b);
+        let x1 = Sha1::digest(buf1);
+
+        let mut buf2 = [0x5c_u8; 64];
+        buf2.iter_mut().zip(h.iter()).for_each(|(a, b)| *a ^= *b);
+        let x2 = Sha1::digest(buf2);
+
+        Ok([x1, x2].concat()[..(cb_required_key_length as usize)].to_owned())
+    }
+
+    pub fn decrypt(
+        &self,
+        key: &[u8],
+        encrypted_stream: &OleStream,
+    ) -> Result<Vec<u8>, DecryptError> {
+        let total_size = u32::from_le_bytes(
+            encrypted_stream.stream[..4]
+                .try_into()
+                .map_err(|_| InvalidStructure)?,
+        ) as usize;
+        // has to be big enough to decrypt into
+        let mut decrypted: Vec<u8> = vec![0; encrypted_stream.stream.len()];
+        let block_start = 8;
+
+        // 16 bit blocks
+        validate!(
+            (encrypted_stream.stream.len() - 8) % 16 == 0,
+            InvalidStructure
+        )?;
+
+        let ecb_cipher = ecb::Decryptor::<aes::Aes128>::new(key.into());
+        ecb_cipher
+            .decrypt_padded_b2b_mut::<NoPadding>(
+                &encrypted_stream.stream[block_start..],
+                &mut decrypted,
+            )
+            .map_err(|_| InvalidStructure)?;
+
+        Ok(decrypted[..total_size].to_vec())
+    }
 }
