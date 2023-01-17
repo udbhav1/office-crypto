@@ -1,5 +1,5 @@
 use crate::validate;
-use crate::DecryptError::{self, *};
+use crate::DecryptError::{self, InvalidHeader, InvalidStructure, IoError, Unimplemented, Unknown};
 
 use bytemuck::cast_slice;
 use derivative::Derivative;
@@ -156,9 +156,9 @@ impl OleFile {
     }
 
     pub fn from_file(filename: &str) -> Result<Self, DecryptError> {
-        let mut file = File::open(filename).map_err(|e| IoError(e))?;
+        let mut file = File::open(filename).map_err(IoError)?;
         let mut raw: Vec<u8> = Vec::new();
-        file.read_to_end(&mut raw).map_err(|e| IoError(e))?;
+        file.read_to_end(&mut raw).map_err(IoError)?;
 
         OleFile::new(raw)
     }
