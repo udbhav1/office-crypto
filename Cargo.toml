@@ -10,6 +10,9 @@ homepage = "https://github.com/udbhav1/office-crypto"
 description = "Pure Rust library to decrypt password-protected MS Office files"
 keywords = ["docx", "xlsx", "pptx", "openxml", "crypto"]
 categories = ["parsing"]
+exclude = [
+    "tests/",
+]
 
 [lib]
 name = "office_crypto"
