@@ -3,6 +3,7 @@ mod ole;
 
 use crypto::{AgileEncryptionInfo, StandardEncryptionInfo};
 use ole::OleFile;
+use std::path::Path;
 use thiserror::Error;
 
 macro_rules! validate {
@@ -18,7 +19,7 @@ macro_rules! validate {
 
 pub(crate) use validate;
 
-pub fn decrypt_from_file(path: &str, password: &str) -> Result<Vec<u8>, DecryptError> {
+pub fn decrypt_from_file<P: AsRef<Path>>(path: P, password: &str) -> Result<Vec<u8>, DecryptError> {
     let mut olefile = OleFile::from_file(path)?;
     olefile.init()?;
 

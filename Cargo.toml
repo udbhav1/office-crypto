@@ -6,10 +6,14 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/udbhav1/office-crypto"
+homepage = "https://github.com/udbhav1/office-crypto"
 description = "Pure Rust library to decrypt password-protected MS Office files"
 keywords = ["docx", "xlsx", "pptx", "openxml", "crypto"]
+categories = ["parsing"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "office_crypto"
+path = "src/lib.rs"
 
 [dependencies]
 packed_struct = "0.10"
@@ -22,7 +26,6 @@ sha2 = "0.10.6"
 aes = "0.8.2"
 cbc = { version = "0.1.2", features = ["block-padding"] }
 ecb = "0.1.1"
-docx = "1.1.2"
 thiserror = "1.0.38"
 
 [dev-dependencies]

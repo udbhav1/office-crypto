@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
+use std::path::Path;
 
 // https://github.com/decalage2/olefile/blob/master/olefile/olefile.py#L207
 const MAGIC: [u8; 8] = [208, 207, 17, 224, 161, 177, 26, 225];
@@ -155,7 +156,7 @@ impl OleFile {
         })
     }
 
-    pub fn from_file(filename: &str) -> Result<Self, DecryptError> {
+    pub fn from_file<P: AsRef<Path>>(filename: P) -> Result<Self, DecryptError> {
         let mut file = File::open(filename).map_err(IoError)?;
         let mut raw: Vec<u8> = Vec::new();
         file.read_to_end(&mut raw).map_err(IoError)?;
