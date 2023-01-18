@@ -30,6 +30,7 @@ thiserror = "1.0.38"
 
 [dev-dependencies]
 bencher = "0.1.5"
+docx = "1.1.2"
 
 [[bench]]
 name = "bench"

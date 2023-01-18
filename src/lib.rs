@@ -5,11 +5,14 @@
 //! This crate exposes two functions: [`decrypt_from_file`] and [`decrypt_from_bytes`], which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx](https://crates.io/crates/docx) or [calamine](https://crates.io/crates/calamine).
 //!
 //! ```rust
+//! # extern crate docx;
 //! use docx::DocxFile;
 //! use office_crypto::decrypt_from_file;
 //! use std::io::Cursor;
 //!
-//! let decrypted: Vec<u8> = decrypt_from_file("protected.docx", "Password1234_").unwrap();
+//! let path = "protected.docx";
+//! # let path = "tests/files/testStandard.docx";
+//! let decrypted: Vec<u8> = decrypt_from_file(path, "Password1234_").unwrap();
 //!
 //! let docx = DocxFile::from_reader(Cursor::new(decrypted)).unwrap();
 //! let docx = docx.parse().unwrap();
@@ -29,7 +32,7 @@
 //!     * [ ] MS-PPT (PowerPoint 2002, 2003, 2004)
 //! * [ ] ECMA-376 (Extensible Encryption)
 //!
-//! Non-SHA512 hash functions on Agile encrypted files will yield [`DecryptError::Unimplemented`].
+//! Agile encrypted files that use non-SHA512 hash functions will yield [`DecryptError::Unimplemented`], though I haven't yet encountered such a file.
 //!
 //! Note that the latest version of Word will create an Agile encrypted document.
 
