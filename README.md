@@ -3,7 +3,7 @@ office-crypto
 [![crates.io](https://img.shields.io/crates/v/office-crypto)](https://crates.io/crates/office-crypto)
 [![docs](https://img.shields.io/docsrs/office-crypto)](https://docs.rs/office-crypto)
 
-Pure Rust library to decrypt password-protected MS Office files
+Pure Rust library to decrypt password-protected MS Office files.
 
 https://docs.rs/office-crypto
 
