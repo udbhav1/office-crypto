@@ -57,7 +57,7 @@ impl AgileEncryptionInfo {
             .map_err(|_| InvalidStructure)?;
 
         let mut reader = Reader::from_str(&raw_xml);
-        reader.trim_text(true);
+        reader.config_mut().trim_text(true);
 
         let mut aei = Self::default();
         let mut set_key_data = false;
