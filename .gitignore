@@ -3,5 +3,6 @@ target/
 **/*.rs.bk
 **/*.DS_Store
 .vscode/
+.idea/
 todo.txt
 **/*.py

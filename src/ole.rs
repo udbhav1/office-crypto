@@ -1,5 +1,5 @@
 use crate::validate;
-use crate::DecryptError::{self, InvalidHeader, InvalidStructure, IoError, Unimplemented, Unknown};
+use crate::DecryptError::{self, InvalidHeader, InvalidStructure, IoError, Unknown};
 
 use bytemuck::cast_slice;
 use derivative::Derivative;
@@ -77,7 +77,6 @@ pub struct OleHeader {
 impl OleHeader {
     fn validate_header(&mut self) -> Result<(), DecryptError> {
         validate!(self.magic == MAGIC, InvalidHeader)?;
-        validate!(self.clsid == ZERO_CLSID, InvalidHeader)?;
         validate!(
             self.dll_version == 3 || self.dll_version == 4,
             InvalidHeader
@@ -180,6 +179,22 @@ impl OleFile {
 
     // takes a path (e.g. [storage_1, storage_1.2, stream])
     pub fn open_stream(&mut self, path: &[String]) -> Result<OleStream, DecryptError> {
+        let node_sid = self.find_stream_sid(path)?;
+
+        self.open_helper(
+            self.direntries[node_sid].packed.isect_start,
+            self.direntries[node_sid].size,
+            false,
+        )
+    }
+
+    pub fn exists(&self, path: &[String]) -> Result<bool, DecryptError> {
+        Ok(path.iter().all(|name|
+            self.direntries.iter().any(|item| item.name.to_lowercase() == name.to_lowercase())
+        ))
+    }
+
+    fn find_stream_sid(&self, path: &[String]) -> Result<usize, DecryptError> {
         // walk direntries red/black tree to find the right stream
         let mut node_sid = self.root_sid;
         for name in path {
@@ -195,11 +210,45 @@ impl OleFile {
             InvalidStructure
         )?;
 
-        self.open_helper(
-            self.direntries[node_sid].packed.isect_start,
-            self.direntries[node_sid].size,
-            false,
-        )
+        Ok(node_sid)
+    }
+
+    pub fn write_stream(&mut self, path: &[String], data: &[u8]) -> Result<(), DecryptError> {
+        let node_sid = self.find_stream_sid(path)?;
+
+        let start_sector = self.direntries[node_sid].packed.isect_start;
+        let stream_size = self.direntries[node_sid].size;
+
+        validate!(data.len() == stream_size as usize, InvalidStructure)?;
+
+        // Write data sector by sector, following the FAT
+        let nb_sectors = ((stream_size + self.sector_size as u64 - 1) / self.sector_size as u64) as usize;
+        let mut sect = start_sector;
+        let mut data_offset = 0usize;
+
+        for _i in 0..nb_sectors {
+            if sect == ENDOFCHAIN {
+                break;
+            }
+
+            let file_offset = ((sect + 1) * self.sector_size) as usize;
+            let bytes_to_write = std::cmp::min(
+                self.sector_size as usize,
+                data.len() - data_offset
+            );
+
+            self.raw[file_offset..(file_offset + bytes_to_write)]
+                .copy_from_slice(&data[data_offset..(data_offset + bytes_to_write)]);
+
+            data_offset += bytes_to_write;
+            sect = self.fat[sect as usize];
+        }
+
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DecryptError> {
+        Ok(self.raw.clone())
     }
 
     fn check_duplicate_stream(
@@ -660,8 +709,15 @@ fn convert_clsid(clsid: [u8; 16]) -> Result<String, DecryptError> {
     if clsid == ZERO_CLSID {
         return Ok(String::new());
     }
-    // return (("%08X-%04X-%04X-%02X%02X-" + "%02X" * 6) % ((i32(clsid, 0), i16(clsid, 4), i16(clsid, 6)) + tuple(map(i8, clsid[8:16]))))
-    Err(Unimplemented("Non-zero CLSID".to_owned()))
+    // Convert CLSID to GUID string format: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+    // https://devblogs.microsoft.com/oldnewthing/20220928-00/?p=107221
+    let d1 = u32::from_le_bytes([clsid[0], clsid[1], clsid[2], clsid[3]]);
+    let d2 = u16::from_le_bytes([clsid[4], clsid[5]]);
+    let d3 = u16::from_le_bytes([clsid[6], clsid[7]]);
+    Ok(format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        d1, d2, d3, clsid[8], clsid[9], clsid[10], clsid[11], clsid[12], clsid[13], clsid[14], clsid[15]
+    ))
 }
 
 fn sect_to_array(sect: &[u8]) -> &[u32] {
