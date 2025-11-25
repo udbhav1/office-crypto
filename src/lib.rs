@@ -123,6 +123,8 @@ pub enum DecryptError {
     InvalidHeader,
     #[error("Invalid File Structure")]
     InvalidStructure,
+    #[error("File is not encrypted")]
+    NotEncrypted,
     #[error("Unimplemented: `{0}`")]
     Unimplemented(String),
     #[error("Unknown Error")]
