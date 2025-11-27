@@ -35,6 +35,7 @@ thiserror = "2.0.17"
 
 [dev-dependencies]
 bencher = "0.1.5"
+docx-rs = "0.4.2"
 
 [[bench]]
 name = "bench"
