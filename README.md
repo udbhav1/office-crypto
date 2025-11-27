@@ -43,9 +43,9 @@ Non-SHA512 hash functions are not yet implemented. This only affects Agile encry
 Measured on an Intel Core i7-7800X (Linux x86_64):
 ```
 running 4 tests
-test bench_agile_sha512        ... bench:  42,440,027 ns/iter (+/- 2,788,737)
-test bench_agile_sha512_large  ... bench:  55,902,807 ns/iter (+/- 151,747)
-test bench_doc97_rc4_cryptoapi ... bench:     155,237 ns/iter (+/- 10,914)
+test bench_agile_sha512        ... bench:  40,243,288 ns/iter (+/- 289,278)
+test bench_agile_sha512_large  ... bench:  53,932,312 ns/iter (+/- 204,625)
+test bench_doc97_rc4_cryptoapi ... bench:     153,159 ns/iter (+/- 5,506)
 test bench_standard            ... bench:  10,537,347 ns/iter (+/- 13,077)
 ```
 

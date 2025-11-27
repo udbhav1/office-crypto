@@ -253,15 +253,12 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
         let v_minor = u16::from_le_bytes([version_info[2], version_info[3]]);
 
         if v_major == 0x0001 && v_minor == 0x0001 {
-            // RC4
-            let mut header_data = vec![0u8; 48];
-            table_stream
-                .stream
-                .as_slice()
-                .read_exact(&mut header_data)
-                .map_err(|_| InvalidStructure)?;
+            // RC4. Header data starting from byte 4 (after version info)
+            let table_data = table_stream.stream.as_slice();
+            validate!(table_data.len() >= 52, InvalidStructure)?;
+            let header_data = &table_data[4..52];
 
-            let header = parse_rc4_header(&header_data)?;
+            let header = parse_rc4_header(header_data)?;
 
             validate!(
                 DocumentRC4::verify_password(
@@ -276,19 +273,12 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
             ("rc4", password.to_owned(), header.salt, 0)
         } else if (v_major == 0x0002 || v_major == 0x0003 || v_major == 0x0004) && v_minor == 0x0002
         {
-            // RC4 CryptoAPI
-            // Re-open the table stream to read from the beginning
-            let table_stream = olefile.open_stream(&[table_name.to_owned()])?;
-            let mut header_data = vec![0u8; encryption_header_size];
-            table_stream
-                .stream
-                .as_slice()
-                .read_exact(&mut header_data)
-                .map_err(|_e| {
-                    InvalidStructure
-                })?;
+            // RC4 CryptoAPI. Header data from the beginning (including version info)
+            let table_data = table_stream.stream.as_slice();
+            validate!(table_data.len() >= encryption_header_size, InvalidStructure)?;
+            let header_data = &table_data[..encryption_header_size];
 
-            let header = parse_rc4_cryptoapi_header(&header_data)?;
+            let header = parse_rc4_cryptoapi_header(header_data)?;
 
             let password_valid = DocumentRC4CryptoAPI::verify_password(
                 password,
