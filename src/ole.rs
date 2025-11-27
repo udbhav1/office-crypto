@@ -198,10 +198,10 @@ impl OleFile {
         // walk direntries red/black tree to find the right stream
         let mut node_sid = self.root_sid;
         for name in path {
-            node_sid = self
-                .direntries
-                .iter()
-                .position(|item| item.name.to_lowercase() == name.to_lowercase())
+            let name_lower = name.to_lowercase();
+            node_sid = *self.direntries[node_sid]
+                .children_map
+                .get(&name_lower)
                 .ok_or(InvalidStructure)?;
         }
 
