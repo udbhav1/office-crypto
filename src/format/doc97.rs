@@ -1,6 +1,6 @@
 //! MS-DOC (Word 97-2004) binary format decryption
 //! Based on msoffcrypto-tool's doc97.py implementation.
-//! https://msdn.microsoft.com/en-us/library/dd944620(v=office.12).aspx
+//! <https://msdn.microsoft.com/en-us/library/dd944620(v=office.12).aspx>
 
 use crate::method::rc4::{DocumentRC4, DocumentRC4CryptoAPI};
 use crate::ole::OleFile;
@@ -140,7 +140,6 @@ fn parse_rc4_header(data: &[u8]) -> Result<RC4Header, DecryptError> {
 
 /// https://msdn.microsoft.com/en-us/library/dd926359(v=office.12).aspx
 fn parse_rc4_cryptoapi_header(data: &[u8]) -> Result<RC4CryptoAPIHeader, DecryptError> {
-
     // EncryptionVersionInfo (first 4 bytes) - already parsed
     // Then read Flags (4 bytes) and HeaderSize (4 bytes)
     validate!(data.len() >= 12, InvalidStructure)?;
@@ -219,9 +218,7 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
         .stream
         .as_slice()
         .read_exact(&mut fib_data)
-        .map_err(|_e| {
-            InvalidStructure
-        })?;
+        .map_err(|_e| InvalidStructure)?;
 
     let fib_base = FibBase::from_bytes(&fib_data)?;
 
@@ -245,9 +242,7 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
             .stream
             .as_slice()
             .read_exact(&mut version_info)
-            .map_err(|_e| {
-                InvalidStructure
-            })?;
+            .map_err(|_e| InvalidStructure)?;
 
         let v_major = u16::from_le_bytes([version_info[0], version_info[1]]);
         let v_minor = u16::from_le_bytes([version_info[2], version_info[3]]);
@@ -285,12 +280,17 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
                 &header.salt,
                 header.key_size,
                 &header.encrypted_verifier,
-                &header.encrypted_verifier_hash
+                &header.encrypted_verifier_hash,
             );
 
             validate!(password_valid, InvalidStructure)?;
 
-            ("rc4_cryptoapi", password.to_owned(), header.salt, header.key_size)
+            (
+                "rc4_cryptoapi",
+                password.to_owned(),
+                header.salt,
+                header.key_size,
+            )
         } else {
             return Err(Unimplemented(format!(
                 "Encryption version {}.{}",
@@ -307,7 +307,13 @@ pub fn decrypt_doc97(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, D
     let decrypted_word_stream_full = if encryption_type == "rc4" {
         DocumentRC4::decrypt(password, &salt, &word_document_stream.stream, 0x200)
     } else {
-        DocumentRC4CryptoAPI::decrypt(password, &salt, key_size, &word_document_stream.stream, 0x200)
+        DocumentRC4CryptoAPI::decrypt(
+            password,
+            &salt,
+            key_size,
+            &word_document_stream.stream,
+            0x200,
+        )
     };
 
     let decrypted_word_data = decrypted_word_stream_full[FIB_LENGTH..].to_vec();

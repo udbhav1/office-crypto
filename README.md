@@ -9,19 +9,15 @@ https://docs.rs/office-crypto
 
 ## Example
 
-This crate exposes two functions: `decrypt_from_file` and `decrypt_from_bytes`, which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx](https://crates.io/crates/docx) or [calamine](https://crates.io/crates/calamine).
+This crate exposes two functions: `decrypt_from_file` and `decrypt_from_bytes`, which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx-rs](https://crates.io/crates/docx-rs) or [calamine](https://crates.io/crates/calamine).
 
 ```rust
 use docx_rs::read_docx;
 use office_crypto::decrypt_from_file;
 
-// This example code is just for illustration.
-// In a real application, handle errors properly.
 let path = "protected.docx";
-if let Ok(decrypted) = decrypt_from_file(path, "Password1234_") {
-    let _docx = read_docx(&decrypted).unwrap();
-    // Now we can access the docx content
-}
+let decrypted = decrypt_from_file(path, "Password1234_").unwrap(); 
+let docx = read_docx(&decrypted).unwrap();
 ```
 
 ## Formats
@@ -40,13 +36,12 @@ Non-SHA512 hash functions are not yet implemented. This only affects Agile encry
 
 ## Performance
 
-Measured on an Intel Core i7-7800X (Linux x86_64):
+Measured on an M4 Max:
 ```
-running 4 tests
-test bench_agile_sha512        ... bench:  40,243,288 ns/iter (+/- 289,278)
-test bench_agile_sha512_large  ... bench:  53,932,312 ns/iter (+/- 204,625)
-test bench_doc97_rc4_cryptoapi ... bench:     153,159 ns/iter (+/- 5,506)
-test bench_standard            ... bench:  10,537,347 ns/iter (+/- 13,077)
+test bench_agile_sha512        ... bench:  15,029,308 ns/iter (+/- 372,423)
+test bench_agile_sha512_large  ... bench:  45,220,041 ns/iter (+/- 3,078,352)
+test bench_standard            ... bench:   3,080,678 ns/iter (+/- 95,020)
+test bench_doc97_rc4_cryptoapi ... bench:      42,690 ns/iter (+/- 1,393)
 ```
 
 File sizes for tests:
@@ -59,4 +54,5 @@ Note that the latest version of Word will create an Agile encrypted document.
 
 ## Acknowledgements
 
-This crate is essentially a port of the OOXML-specific features from [msoffcrypto](https://github.com/nolze/msoffcrypto-tool) and [olefile](https://github.com/decalage2/olefile). 
+This crate is essentially a port of the OOXML-specific features from [msoffcrypto](https://github.com/nolze/msoffcrypto-tool) and [olefile](https://github.com/decalage2/olefile).
+

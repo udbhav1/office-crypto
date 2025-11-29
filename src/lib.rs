@@ -9,10 +9,9 @@
 //! use office_crypto::decrypt_from_file;
 //!
 //! let path = "protected.docx";
-//! if let Ok(decrypted) = decrypt_from_file(path, "Password1234_") {
-//!     let _docx = read_docx(&decrypted).unwrap();
-//!     // Now we can access the docx content
-//! }
+//! # let path = "tests/files/testStandard.docx";
+//! let decrypted = decrypt_from_file(path, "Password1234_").unwrap();
+//! let docx = read_docx(&decrypted).unwrap();
 //! ```
 //!
 //! ## Formats
@@ -82,9 +81,13 @@ fn decrypt(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, DecryptErro
     } else if olefile.exists(&["WordDocument".to_owned()])? {
         doc97::decrypt_doc97(olefile, password)
     } else if olefile.exists(&["Workbook".to_owned()])? {
-        Err(DecryptError::Unimplemented("Excel binary format (.xls) not yet supported".to_owned()))
+        Err(DecryptError::Unimplemented(
+            "Excel binary format (.xls) not yet supported".to_owned(),
+        ))
     } else if olefile.exists(&["Current User".to_owned()])? {
-        Err(DecryptError::Unimplemented("PowerPoint binary format (.ppt) not yet supported".to_owned()))
+        Err(DecryptError::Unimplemented(
+            "PowerPoint binary format (.ppt) not yet supported".to_owned(),
+        ))
     } else {
         Err(DecryptError::InvalidStructure)
     }
