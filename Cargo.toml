@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/udbhav1/office-crypto"
 homepage = "https://github.com/udbhav1/office-crypto"
 description = "Pure Rust library to decrypt password-protected MS Office files"
-keywords = ["docx", "xlsx", "pptx", "openxml", "crypto"]
+keywords = ["office", "docx", "doc", "openxml", "crypto"]
 categories = ["parsing"]
 exclude = [
     "tests/",
@@ -19,21 +19,23 @@ name = "office_crypto"
 path = "src/lib.rs"
 
 [dependencies]
-packed_struct = "0.10"
-bytemuck = "1.12.3"
+packed_struct = "0.10.1"
+bytemuck = "1.24.0"
 derivative = "2.2.0"
-quick-xml = "0.27.1"
-base64 = "0.21.0"
+quick-xml = "0.38.4"
+base64 = "0.22.1"
 sha1 = "0.10.5"
 sha2 = "0.10.6"
+md-5 = "0.10.6"
 aes = "0.8.2"
+rc4 = "0.1.0"
 cbc = { version = "0.1.2", features = ["block-padding"] }
-ecb = "0.1.1"
-thiserror = "1.0.38"
+ecb = "0.1.2"
+thiserror = "2.0.17"
 
 [dev-dependencies]
 bencher = "0.1.5"
-docx = "1.1.2"
+docx-rs = "0.4.2"
 
 [[bench]]
 name = "bench"

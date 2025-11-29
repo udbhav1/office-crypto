@@ -40,10 +40,19 @@ fn bench_standard(b: &mut Bencher) {
     });
 }
 
+fn bench_doc97_rc4_cryptoapi(b: &mut Bencher) {
+    b.iter(|| {
+        // Encrypted legacy DOC (RC4 CryptoAPI)
+        let data = read_test_file("testRC4CryptoAPI.doc");
+        black_box(decrypt_from_bytes(data, "Password1234_").unwrap());
+    });
+}
+
 benchmark_group!(
     benches,
     bench_agile_sha512,
     bench_agile_sha512_large,
-    bench_standard
+    bench_standard,
+    bench_doc97_rc4_cryptoapi
 );
 benchmark_main!(benches);

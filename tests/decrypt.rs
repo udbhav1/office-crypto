@@ -47,3 +47,23 @@ fn standard_sha512() {
 
     assert!(decrypted == expected);
 }
+
+#[test]
+fn rc4_cryptoapi_doc() {
+    // from msoffcrypto-tool tests
+    let decrypted =
+        decrypt_from_bytes(utils::read_test_file("testRC4CryptoAPI.doc"), "Password1234_")
+            .unwrap();
+    let expected = utils::read_test_file("expectedRC4CryptoAPI.doc");
+
+    assert_eq!(decrypted, expected);
+}
+
+#[test]
+fn doc97_not_encrypted() {
+    // expectedRC4CryptoAPI.doc is an unencrypted doc file
+    let result =
+        decrypt_from_bytes(utils::read_test_file("expectedRC4CryptoAPI.doc"), "anypassword");
+
+    assert!(matches!(result, Err(DecryptError::NotEncrypted)));
+}

@@ -9,19 +9,15 @@ https://docs.rs/office-crypto
 
 ## Example
 
-This crate exposes two functions: `decrypt_from_file` and `decrypt_from_bytes`, which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx](https://crates.io/crates/docx) or [calamine](https://crates.io/crates/calamine).
+This crate exposes two functions: `decrypt_from_file` and `decrypt_from_bytes`, which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx-rs](https://crates.io/crates/docx-rs) or [calamine](https://crates.io/crates/calamine).
 
 ```rust
-use docx::DocxFile;
+use docx_rs::read_docx;
 use office_crypto::decrypt_from_file;
-use std::io::Cursor;
 
-let decrypted: Vec<u8> = decrypt_from_file("protected.docx", "Password1234_").unwrap();
-
-let docx = DocxFile::from_reader(Cursor::new(decrypted)).unwrap();
-let docx = docx.parse().unwrap();
-
-// Now we can access the docx content
+let path = "protected.docx";
+let decrypted = decrypt_from_file(path, "Password1234_").unwrap(); 
+let docx = read_docx(&decrypted).unwrap();
 ```
 
 ## Formats
@@ -30,8 +26,8 @@ let docx = docx.parse().unwrap();
     * [x] MS-DOCX (OOXML) (Word 2007-Present)
     * [x] MS-XLSX (OOXML) (Excel 2007-Present)
     * [x] MS-PPTX (OOXML) (PowerPoint 2007-Present)
-* [ ] Office Binary Document RC4 CryptoAPI
-    * [ ] MS-DOC (Word 2002, 2003, 2004)
+* [-] Office Binary Document RC4 CryptoAPI
+    * [x] MS-DOC (Word 2002, 2003, 2004)
     * [ ] MS-XLS (Excel 2002, 2003, 2004)
     * [ ] MS-PPT (PowerPoint 2002, 2003, 2004)
 * [ ] ECMA-376 (Extensible Encryption)
@@ -40,21 +36,23 @@ Non-SHA512 hash functions are not yet implemented. This only affects Agile encry
 
 ## Performance
 
-Measured on an M1 Pro:
+Measured on an M4 Max:
 ```
-running 3 tests
-test bench_agile_sha512       ... bench:  27,106,487 ns/iter (+/- 505,175)
-test bench_agile_sha512_large ... bench:  71,372,716 ns/iter (+/- 3,915,458)
-test bench_standard           ... bench:   6,379,766 ns/iter (+/- 100,688)
+test bench_agile_sha512        ... bench:  15,029,308 ns/iter (+/- 372,423)
+test bench_agile_sha512_large  ... bench:  45,220,041 ns/iter (+/- 3,078,352)
+test bench_standard            ... bench:   3,080,678 ns/iter (+/- 95,020)
+test bench_doc97_rc4_cryptoapi ... bench:      42,690 ns/iter (+/- 1,393)
 ```
 
 File sizes for tests:
 - `bench_agile_sha512` => 25 KB
 - `bench_agile_sha512_large` => 7.1 MB
 - `bench_standard` => 7 KB
+- `bench_doc97_rc4_cryptoapi` => 23 KB
 
 Note that the latest version of Word will create an Agile encrypted document.
 
 ## Acknowledgements
 
-This crate is essentially a port of the OOXML-specific features from [msoffcrypto](https://github.com/nolze/msoffcrypto-tool) and [olefile](https://github.com/decalage2/olefile). 
+This crate is essentially a port of the OOXML-specific features from [msoffcrypto](https://github.com/nolze/msoffcrypto-tool) and [olefile](https://github.com/decalage2/olefile).
+

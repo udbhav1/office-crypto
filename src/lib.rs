@@ -2,22 +2,16 @@
 //!
 //! ## Example
 //!
-//! This crate exposes two functions: [`decrypt_from_file`] and [`decrypt_from_bytes`], which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx](https://crates.io/crates/docx) or [calamine](https://crates.io/crates/calamine).
+//! This crate exposes two functions: [`decrypt_from_file`] and [`decrypt_from_bytes`], which do exactly what they say they do. The resulting bytes can then be interpreted by any MS Office parser like [docx-rs](https://crates.io/crates/docx-rs) or [calamine](https://crates.io/crates/calamine).
 //!
 //! ```rust
-//! # extern crate docx;
-//! use docx::DocxFile;
+//! use docx_rs::read_docx;
 //! use office_crypto::decrypt_from_file;
-//! use std::io::Cursor;
 //!
 //! let path = "protected.docx";
 //! # let path = "tests/files/testStandard.docx";
-//! let decrypted: Vec<u8> = decrypt_from_file(path, "Password1234_").unwrap();
-//!
-//! let docx = DocxFile::from_reader(Cursor::new(decrypted)).unwrap();
-//! let docx = docx.parse().unwrap();
-//!
-//! // Now we can access the docx content
+//! let decrypted = decrypt_from_file(path, "Password1234_").unwrap();
+//! let docx = read_docx(&decrypted).unwrap();
 //! ```
 //!
 //! ## Formats
@@ -26,8 +20,8 @@
 //!     * [x] MS-DOCX (OOXML) (Word 2007-Present)
 //!     * [x] MS-XLSX (OOXML) (Excel 2007-Present)
 //!     * [x] MS-PPTX (OOXML) (PowerPoint 2007-Present)
-//! * [ ] Office Binary Document RC4 CryptoAPI
-//!     * [ ] MS-DOC (Word 2002, 2003, 2004)
+//! * [~] Office Binary Document RC4 CryptoAPI
+//!     * [x] MS-DOC (Word 2002, 2003, 2004)
 //!     * [ ] MS-XLS (Excel 2002, 2003, 2004)
 //!     * [ ] MS-PPT (PowerPoint 2002, 2003, 2004)
 //! * [ ] ECMA-376 (Extensible Encryption)
@@ -37,9 +31,12 @@
 //! Note that the latest version of Word will create an Agile encrypted document.
 
 mod crypto;
+mod format;
+mod method;
 mod ole;
 
 use crypto::{AgileEncryptionInfo, StandardEncryptionInfo};
+use format::doc97;
 use ole::OleFile;
 use std::path::Path;
 use thiserror::Error;
@@ -78,6 +75,25 @@ pub fn decrypt_from_bytes(raw: Vec<u8>, password: &str) -> Result<Vec<u8>, Decry
 }
 
 fn decrypt(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, DecryptError> {
+    // Detect format. OOXML has EncryptionInfo stream, binary formats don't
+    if olefile.exists(&["EncryptionInfo".to_owned()])? {
+        decrypt_ooxml(olefile, password)
+    } else if olefile.exists(&["WordDocument".to_owned()])? {
+        doc97::decrypt_doc97(olefile, password)
+    } else if olefile.exists(&["Workbook".to_owned()])? {
+        Err(DecryptError::Unimplemented(
+            "Excel binary format (.xls) not yet supported".to_owned(),
+        ))
+    } else if olefile.exists(&["Current User".to_owned()])? {
+        Err(DecryptError::Unimplemented(
+            "PowerPoint binary format (.ppt) not yet supported".to_owned(),
+        ))
+    } else {
+        Err(DecryptError::InvalidStructure)
+    }
+}
+
+fn decrypt_ooxml(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, DecryptError> {
     let encryption_info_stream = olefile.open_stream(&["EncryptionInfo".to_owned()])?;
     let encrypted_package_stream = olefile.open_stream(&["EncryptedPackage".to_owned()])?;
 
@@ -106,6 +122,8 @@ pub enum DecryptError {
     InvalidHeader,
     #[error("Invalid File Structure")]
     InvalidStructure,
+    #[error("File is not encrypted")]
+    NotEncrypted,
     #[error("Unimplemented: `{0}`")]
     Unimplemented(String),
     #[error("Unknown Error")]
