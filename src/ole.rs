@@ -221,6 +221,13 @@ impl OleFile {
 
         validate!(data.len() == stream_size as usize, InvalidStructure)?;
 
+        // Streams smaller than the cutoff live in the mini-FAT (packed inside the
+        // root ministream), not directly in the main FAT. Writing them through the
+        // main-FAT path computes bogus offsets, so route them separately.
+        if stream_size < self.header.mini_stream_cutoff_size as u64 {
+            return self.write_mini_stream(start_sector, data);
+        }
+
         // Write data sector by sector, following the FAT
         let nb_sectors = ((stream_size + self.sector_size as u64 - 1) / self.sector_size as u64) as usize;
         let mut sect = start_sector;
@@ -242,6 +249,63 @@ impl OleFile {
 
             data_offset += bytes_to_write;
             sect = self.fat[sect as usize];
+        }
+
+        Ok(())
+    }
+
+    /// Write `data` into a stream stored in the mini-FAT.
+    ///
+    /// Mini streams are packed into the root entry's "ministream", which is itself
+    /// an ordinary main-FAT stream. So each mini-sector maps to a byte range inside
+    /// the ministream, which in turn maps to a physical offset in `self.raw` via the
+    /// ministream's own main-FAT sector chain. `mini_sector_size` (64) always divides
+    /// `sector_size` (512), so a mini-sector never straddles two physical sectors.
+    fn write_mini_stream(&mut self, start_mini_sector: u32, data: &[u8]) -> Result<(), DecryptError> {
+        // The mini-FAT and ministream are loaded lazily when a small stream is first
+        // opened; decrypt paths always read before writing, but load defensively.
+        if self.ministream.is_none() {
+            self.load_minifat()?;
+            let size_ministream = self.direntries[self.root_sid].size;
+            self.ministream = Some(self.open_helper(
+                self.direntries[self.root_sid].packed.isect_start,
+                size_ministream,
+                true,
+            )?);
+        }
+
+        // Walk the ministream's own main-FAT chain once so mini-sector -> physical
+        // offset is a simple lookup.
+        let mut container_sectors: Vec<u32> = Vec::new();
+        let mut sect = self.direntries[self.root_sid].packed.isect_start;
+        while sect != ENDOFCHAIN && sect != FREESECT {
+            container_sectors.push(sect);
+            sect = *self.fat.get(sect as usize).ok_or(InvalidStructure)?;
+        }
+
+        let mini = self.mini_sector_size as usize;
+        let sector_size = self.sector_size as usize;
+        let mut mini_sect = start_mini_sector;
+        let mut data_offset = 0usize;
+
+        while mini_sect != ENDOFCHAIN && mini_sect != FREESECT && data_offset < data.len() {
+            let ministream_byte = mini_sect as usize * mini;
+            let sector_ord = ministream_byte / sector_size;
+            let off_in_sect = ministream_byte % sector_size;
+
+            let phys = *container_sectors
+                .get(sector_ord)
+                .ok_or(InvalidStructure)?;
+            let file_offset = (phys as usize + 1) * sector_size + off_in_sect;
+
+            let bytes_to_write = std::cmp::min(mini, data.len() - data_offset);
+            validate!(file_offset + bytes_to_write <= self.raw.len(), InvalidStructure)?;
+
+            self.raw[file_offset..(file_offset + bytes_to_write)]
+                .copy_from_slice(&data[data_offset..(data_offset + bytes_to_write)]);
+
+            data_offset += bytes_to_write;
+            mini_sect = *self.minifat.get(mini_sect as usize).ok_or(InvalidStructure)?;
         }
 
         Ok(())
