@@ -65,7 +65,7 @@ impl AgileEncryptionInfo {
         let mut set_password_node = false;
 
         loop {
-            match reader.read_event().unwrap() {
+            match reader.read_event().map_err(|_| InvalidStructure)? {
                 Event::Empty(e) => match e.name().as_ref() {
                     b"keyData" if !set_key_data => {
                         for attr in e.attributes() {
@@ -170,11 +170,19 @@ impl AgileEncryptionInfo {
         key: &[u8],
         encrypted_stream: &OleStream,
     ) -> Result<Vec<u8>, DecryptError> {
+        validate!(encrypted_stream.stream.len() >= 8, InvalidStructure)?;
         let total_size = u32::from_le_bytes(
             encrypted_stream.stream[..4]
                 .try_into()
                 .map_err(|_| InvalidStructure)?,
         ) as usize;
+        // `total_size` is the declared plaintext length read straight from the
+        // file. Reject any value larger than the ciphertext actually present
+        // (everything after the 8-byte header) before allocating, so a crafted
+        // stream cannot force a huge allocation or push the segment loop and
+        // the final-block copy out of bounds.
+        let available = encrypted_stream.stream.len() - 8;
+        validate!(total_size <= available, InvalidStructure)?;
         let mut block_start: usize = 8; // skip first 8 bytes
         let mut block_index: u32 = 0;
         let mut decrypted: Vec<u8> = vec![0; total_size];
@@ -182,7 +190,10 @@ impl AgileEncryptionInfo {
 
         match self.key_data_hash_algorithm.as_str() {
             "SHA512" => {
-                while block_start < (total_size - SEGMENT_LENGTH) {
+                // Equivalent to `block_start < total_size - SEGMENT_LENGTH`
+                // but without the subtraction that underflows when
+                // `total_size < SEGMENT_LENGTH`.
+                while block_start + SEGMENT_LENGTH < total_size {
                     let iv = Sha512::digest([key_data_salt, &block_index.to_le_bytes()].concat());
                     let iv = &iv[..16];
 
@@ -205,7 +216,6 @@ impl AgileEncryptionInfo {
                 let iv = &iv[..16];
 
                 let cbc_cipher = cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into());
-                let irregular_block_len = remaining % 16;
 
                 // remaining bytes in encrypted_stream should be a multiple of block size even if we only use some of the decrypted bytes
                 let ciphertext = &encrypted_stream.stream[block_start..];
@@ -215,12 +225,12 @@ impl AgileEncryptionInfo {
                 cbc_cipher
                     .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut plaintext)
                     .map_err(|_| InvalidStructure)?;
-                let mut copy_span = plaintext.len() - 16 + irregular_block_len;
-                if irregular_block_len == 0 {
-                    copy_span += 16;
-                }
-                decrypted[(block_start - 8)..(block_start + copy_span - 8)]
-                    .copy_from_slice(&plaintext[..copy_span]);
+                // Keep exactly `remaining` plaintext bytes. The final ciphertext
+                // block is padded up to a 16-byte multiple, so it always holds
+                // at least `remaining` bytes; guard rather than trust it.
+                validate!(remaining <= plaintext.len(), InvalidStructure)?;
+                decrypted[(block_start - 8)..(block_start - 8 + remaining)]
+                    .copy_from_slice(&plaintext[..remaining]);
                 Ok(decrypted)
             }
             "SHA384" => Err(Unimplemented("SHA384".to_owned())),
@@ -427,6 +437,7 @@ impl StandardEncryptionInfo {
         key: &[u8],
         encrypted_stream: &OleStream,
     ) -> Result<Vec<u8>, DecryptError> {
+        validate!(encrypted_stream.stream.len() >= 8, InvalidStructure)?;
         let total_size = u32::from_le_bytes(
             encrypted_stream.stream[..4]
                 .try_into()
@@ -441,6 +452,9 @@ impl StandardEncryptionInfo {
             (encrypted_stream.stream.len() - 8) % 16 == 0,
             InvalidStructure
         )?;
+        // `total_size` is declared in the file; never slice past what we
+        // actually decrypted.
+        validate!(total_size <= decrypted.len(), InvalidStructure)?;
 
         let ecb_cipher = ecb::Decryptor::<aes::Aes128>::new(key.into());
         ecb_cipher
