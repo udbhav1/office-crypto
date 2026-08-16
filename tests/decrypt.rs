@@ -60,6 +60,20 @@ fn rc4_cryptoapi_doc() {
 }
 
 #[test]
+fn oversized_declared_size_is_rejected_not_panicking() {
+    // craftedOversizedSize.docx reuses a genuine agile EncryptionInfo but its
+    // EncryptedPackage is 16 bytes whose header declares a ~4 GiB plaintext.
+    // Before the size check this triggered a ~4 GiB allocation request and an
+    // out-of-range panic; it must now return a clean error instead.
+    let result = decrypt_from_bytes(
+        utils::read_test_file("craftedOversizedSize.docx"),
+        "anyPassword",
+    );
+
+    assert!(matches!(result, Err(DecryptError::InvalidStructure)));
+}
+
+#[test]
 fn doc97_not_encrypted() {
     // expectedRC4CryptoAPI.doc is an unencrypted doc file
     let result =
