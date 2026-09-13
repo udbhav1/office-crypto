@@ -29,7 +29,7 @@ let docx = read_docx(&decrypted).unwrap();
 * [-] Office Binary Document RC4 CryptoAPI
     * [x] MS-DOC (Word 2002, 2003, 2004)
     * [ ] MS-XLS (Excel 2002, 2003, 2004)
-    * [ ] MS-PPT (PowerPoint 2002, 2003, 2004)
+    * [x] MS-PPT (PowerPoint 2002, 2003, 2004)
 * [ ] ECMA-376 (Extensible Encryption)
 
 Non-SHA512 hash functions are not yet implemented. This only affects Agile encrypted files, but I have yet to find one that doesn't use SHA512.

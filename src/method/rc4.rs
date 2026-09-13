@@ -2,8 +2,38 @@
 //! Based on msoffcrypto-tool's RC4 and RC4CryptoAPI implementations.
 
 use md5::{Digest, Md5};
-use rc4::{consts::U16, KeyInit, Rc4, StreamCipher};
+use rc4::{
+    consts::{U10, U11, U12, U13, U14, U15, U16, U5, U6, U7, U8, U9},
+    KeyInit, Rc4, StreamCipher,
+};
 use sha1::Sha1;
+
+/// Apply an RC4 keystream to `data`, with a key of whatever length the file asked for.
+///
+/// An RC4 CryptoAPI file names its key size in bits, anywhere from 40 to 128 in steps of 8,
+/// and the cipher takes the key at exactly that length. The cipher carries its key length in
+/// its type, so the length has to be matched into a type here. A length outside that range is
+/// padded to 128 bits, which is what a 40-bit key is given for the same reason.
+fn apply_rc4(key: &[u8], data: &mut [u8]) {
+    macro_rules! by_key_length {
+        ($($len:literal => $size:ty),+ $(,)?) => {
+            match key.len() {
+                $($len => Rc4::<$size>::new(key.into()).apply_keystream(data),)+
+                _ => {
+                    let mut padded = [0u8; 16];
+                    let taken = key.len().min(16);
+                    padded[..taken].copy_from_slice(&key[..taken]);
+                    Rc4::<U16>::new(padded.as_slice().into()).apply_keystream(data);
+                }
+            }
+        };
+    }
+
+    by_key_length!(
+        5 => U5, 6 => U6, 7 => U7, 8 => U8, 9 => U9, 10 => U10,
+        11 => U11, 12 => U12, 13 => U13, 14 => U14, 15 => U15, 16 => U16,
+    );
+}
 
 /// Intermediate key for RC4 encryption
 /// https://msdn.microsoft.com/en-us/library/dd920360(v=office.12).aspx
@@ -86,27 +116,29 @@ impl DocumentRC4 {
 
         // Same cipher for both verifier and hash
         // The state must not restart
-        let mut cipher = Rc4::<U16>::new(key.as_slice().into());
+        // One cipher for both: the keystream must not restart between them.
+        let mut both = encrypted_verifier.to_vec();
+        both.extend_from_slice(encrypted_verifier_hash);
+        apply_rc4(&key, &mut both);
+        let (verifier, verifier_hash) = both.split_at(encrypted_verifier.len());
 
-        let mut verifier = encrypted_verifier.to_vec();
-        cipher.apply_keystream(&mut verifier);
-
-        let mut verifier_hash = encrypted_verifier_hash.to_vec();
-        cipher.apply_keystream(&mut verifier_hash);  // Continue with same cipher!
-
-        let hash = Md5::digest(&verifier);
+        let hash = Md5::digest(verifier);
         hash.as_slice() == verifier_hash
     }
 
-    pub fn decrypt(password: &str, salt: &[u8], encrypted_data: &[u8], blocksize: usize,) -> Vec<u8> {
+    pub fn decrypt(
+        password: &str,
+        salt: &[u8],
+        encrypted_data: &[u8],
+        blocksize: usize,
+    ) -> Vec<u8> {
         let mut decrypted = Vec::with_capacity(encrypted_data.len());
         let mut block = 0u32;
 
         for chunk in encrypted_data.chunks(blocksize) {
             let key = makekey_rc4(password, salt, block);
             let mut dec_chunk = chunk.to_vec();
-            let mut cipher = Rc4::<U16>::new(key.as_slice().into());
-            cipher.apply_keystream(&mut dec_chunk);
+            apply_rc4(&key, &mut dec_chunk);
             decrypted.extend_from_slice(&dec_chunk);
             block += 1;
         }
@@ -130,14 +162,33 @@ impl DocumentRC4CryptoAPI {
         let block = 0;
         let key = makekey_rc4_cryptoapi(password, salt, key_size, block);
 
-        let mut cipher = Rc4::<U16>::new(key.as_slice().into());
-        let mut verifier = encrypted_verifier.to_vec();
-        cipher.apply_keystream(&mut verifier);
-        let mut verifier_hash = encrypted_verifier_hash.to_vec();
-        cipher.apply_keystream(&mut verifier_hash);  // Continue with same cipher!
+        // One cipher for both: the keystream must not restart between them.
+        let mut both = encrypted_verifier.to_vec();
+        both.extend_from_slice(encrypted_verifier_hash);
+        apply_rc4(&key, &mut both);
+        let (verifier, verifier_hash) = both.split_at(encrypted_verifier.len());
 
-        let hash = Sha1::digest(&verifier);
+        let hash = Sha1::digest(verifier);
         hash.as_slice() == verifier_hash
+    }
+
+    /// Decrypt one block, keyed by an explicit block number rather than by position.
+    ///
+    /// Word numbers the blocks of a stream from zero and rekeys every `blocksize` bytes.
+    /// PowerPoint encrypts each persist object on its own, keyed by the object's persist
+    /// identifier, so the block number comes from the caller and the data is one block
+    /// however long it is.
+    pub fn decrypt_block(
+        password: &str,
+        salt: &[u8],
+        key_size: u32,
+        encrypted_data: &[u8],
+        block: u32,
+    ) -> Vec<u8> {
+        let key = makekey_rc4_cryptoapi(password, salt, key_size, block);
+        let mut decrypted = encrypted_data.to_vec();
+        apply_rc4(&key, &mut decrypted);
+        decrypted
     }
 
     pub fn decrypt(
@@ -153,8 +204,7 @@ impl DocumentRC4CryptoAPI {
         for chunk in encrypted_data.chunks(blocksize) {
             let key = makekey_rc4_cryptoapi(password, salt, key_size, block);
             let mut dec_chunk = chunk.to_vec();
-            let mut cipher = Rc4::<U16>::new(key.as_slice().into());
-            cipher.apply_keystream(&mut dec_chunk);
+            apply_rc4(&key, &mut dec_chunk);
             decrypted.extend_from_slice(&dec_chunk);
             block += 1;
         }

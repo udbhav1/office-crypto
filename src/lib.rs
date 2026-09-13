@@ -23,7 +23,7 @@
 //! * [~] Office Binary Document RC4 CryptoAPI
 //!     * [x] MS-DOC (Word 2002, 2003, 2004)
 //!     * [ ] MS-XLS (Excel 2002, 2003, 2004)
-//!     * [ ] MS-PPT (PowerPoint 2002, 2003, 2004)
+//!     * [x] MS-PPT (PowerPoint 2002, 2003, 2004)
 //! * [ ] ECMA-376 (Extensible Encryption)
 //!
 //! Agile encrypted files that use non-SHA512 hash functions will yield [`DecryptError::Unimplemented`], though I haven't yet encountered such a file.
@@ -36,7 +36,7 @@ mod method;
 mod ole;
 
 use crypto::{AgileEncryptionInfo, StandardEncryptionInfo};
-use format::doc97;
+use format::{doc97, ppt97};
 use ole::OleFile;
 use std::path::Path;
 use thiserror::Error;
@@ -85,9 +85,7 @@ fn decrypt(olefile: &mut OleFile, password: &str) -> Result<Vec<u8>, DecryptErro
             "Excel binary format (.xls) not yet supported".to_owned(),
         ))
     } else if olefile.exists(&["Current User".to_owned()])? {
-        Err(DecryptError::Unimplemented(
-            "PowerPoint binary format (.ppt) not yet supported".to_owned(),
-        ))
+        ppt97::decrypt_ppt97(olefile, password)
     } else {
         Err(DecryptError::InvalidStructure)
     }

@@ -2,6 +2,7 @@
 //! Based on msoffcrypto-tool's doc97.py implementation.
 //! <https://msdn.microsoft.com/en-us/library/dd944620(v=office.12).aspx>
 
+use crate::format::common::parse_rc4_cryptoapi_header;
 use crate::method::rc4::{DocumentRC4, DocumentRC4CryptoAPI};
 use crate::ole::OleFile;
 use crate::validate;
@@ -119,14 +120,6 @@ struct RC4Header {
     encrypted_verifier_hash: Vec<u8>,
 }
 
-#[derive(Debug)]
-struct RC4CryptoAPIHeader {
-    salt: Vec<u8>,
-    key_size: u32,
-    encrypted_verifier: Vec<u8>,
-    encrypted_verifier_hash: Vec<u8>,
-}
-
 /// https://msdn.microsoft.com/en-us/library/dd908560(v=office.12).aspx
 fn parse_rc4_header(data: &[u8]) -> Result<RC4Header, DecryptError> {
     validate!(data.len() >= 48, InvalidStructure)?;
@@ -135,77 +128,6 @@ fn parse_rc4_header(data: &[u8]) -> Result<RC4Header, DecryptError> {
         salt: data[0..16].to_vec(),
         encrypted_verifier: data[16..32].to_vec(),
         encrypted_verifier_hash: data[32..48].to_vec(),
-    })
-}
-
-/// https://msdn.microsoft.com/en-us/library/dd926359(v=office.12).aspx
-fn parse_rc4_cryptoapi_header(data: &[u8]) -> Result<RC4CryptoAPIHeader, DecryptError> {
-    // EncryptionVersionInfo (first 4 bytes) - already parsed
-    // Then read Flags (4 bytes) and HeaderSize (4 bytes)
-    validate!(data.len() >= 12, InvalidStructure)?;
-
-    let _flags = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    let header_size = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
-
-    // Header structure offset by 4 (version already parsed) + 8 (flags + headerSize) = 12
-    if data.len() < 12 + header_size {
-        return Err(InvalidStructure);
-    }
-
-    let header_data = &data[12..(12 + header_size)];
-    if header_data.len() < 32 {
-        return Err(InvalidStructure);
-    }
-
-    // Parse EncryptionHeader structure
-    let _alg_id = u32::from_le_bytes([
-        header_data[8],
-        header_data[9],
-        header_data[10],
-        header_data[11],
-    ]);
-    let _alg_id_hash = u32::from_le_bytes([
-        header_data[12],
-        header_data[13],
-        header_data[14],
-        header_data[15],
-    ]);
-    let key_size = u32::from_le_bytes([
-        header_data[16],
-        header_data[17],
-        header_data[18],
-        header_data[19],
-    ]);
-
-    // Default key size if 0
-    let key_size = if key_size == 0 { 0x28 } else { key_size };
-
-    // Parse EncryptionVerifier structure
-    let verifier_offset = 12 + header_size;
-    validate!(data.len() >= verifier_offset + 36, InvalidStructure)?;
-
-    let verifier_data = &data[verifier_offset..];
-    let _salt_size = u32::from_le_bytes([
-        verifier_data[0],
-        verifier_data[1],
-        verifier_data[2],
-        verifier_data[3],
-    ]);
-    let salt = verifier_data[4..20].to_vec();
-    let encrypted_verifier = verifier_data[20..36].to_vec();
-    let _verifier_hash_size = u32::from_le_bytes([
-        verifier_data[36],
-        verifier_data[37],
-        verifier_data[38],
-        verifier_data[39],
-    ]);
-    let encrypted_verifier_hash = verifier_data[40..60].to_vec();
-
-    Ok(RC4CryptoAPIHeader {
-        salt,
-        key_size,
-        encrypted_verifier,
-        encrypted_verifier_hash,
     })
 }
 
