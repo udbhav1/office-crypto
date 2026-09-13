@@ -51,9 +51,11 @@ fn standard_sha512() {
 #[test]
 fn rc4_cryptoapi_doc() {
     // from msoffcrypto-tool tests
-    let decrypted =
-        decrypt_from_bytes(utils::read_test_file("testRC4CryptoAPI.doc"), "Password1234_")
-            .unwrap();
+    let decrypted = decrypt_from_bytes(
+        utils::read_test_file("testRC4CryptoAPI.doc"),
+        "Password1234_",
+    )
+    .unwrap();
     let expected = utils::read_test_file("expectedRC4CryptoAPI.doc");
 
     assert_eq!(decrypted, expected);
@@ -62,8 +64,41 @@ fn rc4_cryptoapi_doc() {
 #[test]
 fn doc97_not_encrypted() {
     // expectedRC4CryptoAPI.doc is an unencrypted doc file
-    let result =
-        decrypt_from_bytes(utils::read_test_file("expectedRC4CryptoAPI.doc"), "anypassword");
+    let result = decrypt_from_bytes(
+        utils::read_test_file("expectedRC4CryptoAPI.doc"),
+        "anypassword",
+    );
+
+    assert!(matches!(result, Err(DecryptError::NotEncrypted)));
+}
+
+#[test]
+fn rc4_cryptoapi_ppt() {
+    // from msoffcrypto-tool tests
+    let decrypted = decrypt_from_bytes(
+        utils::read_test_file("testRC4CryptoAPI.ppt"),
+        "Password1234_",
+    )
+    .unwrap();
+    let expected = utils::read_test_file("expectedRC4CryptoAPI.ppt");
+
+    assert_eq!(decrypted, expected);
+}
+
+#[test]
+fn ppt97_wrong_password() {
+    let result = decrypt_from_bytes(utils::read_test_file("testRC4CryptoAPI.ppt"), "wrong");
+
+    assert!(matches!(result, Err(DecryptError::InvalidStructure)));
+}
+
+#[test]
+fn ppt97_not_encrypted() {
+    // expectedRC4CryptoAPI.ppt is an unencrypted ppt file
+    let result = decrypt_from_bytes(
+        utils::read_test_file("expectedRC4CryptoAPI.ppt"),
+        "anypassword",
+    );
 
     assert!(matches!(result, Err(DecryptError::NotEncrypted)));
 }
