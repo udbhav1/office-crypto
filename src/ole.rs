@@ -130,7 +130,11 @@ impl OleFile {
         let filesize = raw.len() as u32;
         validate!(filesize > 76, InvalidHeader)?;
 
-        let header: [u8; 76] = raw[..76].try_into().unwrap();
+        let header: [u8; 76] = raw
+            .get(..76)
+            .ok_or(InvalidHeader)?
+            .try_into()
+            .map_err(|_| InvalidHeader)?;
         let mut header = OleHeader::unpack(&header).map_err(|_| InvalidHeader)?;
         header.validate_header()?;
 
@@ -180,18 +184,17 @@ impl OleFile {
     // takes a path (e.g. [storage_1, storage_1.2, stream])
     pub fn open_stream(&mut self, path: &[String]) -> Result<OleStream, DecryptError> {
         let node_sid = self.find_stream_sid(path)?;
+        let node = self.direntries.get(node_sid).ok_or(InvalidStructure)?;
 
-        self.open_helper(
-            self.direntries[node_sid].packed.isect_start,
-            self.direntries[node_sid].size,
-            false,
-        )
+        self.open_helper(node.packed.isect_start, node.size, false)
     }
 
     pub fn exists(&self, path: &[String]) -> Result<bool, DecryptError> {
-        Ok(path.iter().all(|name|
-            self.direntries.iter().any(|item| item.name.to_lowercase() == name.to_lowercase())
-        ))
+        Ok(path.iter().all(|name| {
+            self.direntries
+                .iter()
+                .any(|item| item.name.to_lowercase() == name.to_lowercase())
+        }))
     }
 
     fn find_stream_sid(&self, path: &[String]) -> Result<usize, DecryptError> {
@@ -199,14 +202,22 @@ impl OleFile {
         let mut node_sid = self.root_sid;
         for name in path {
             let name_lower = name.to_lowercase();
-            node_sid = *self.direntries[node_sid]
+            node_sid = *self
+                .direntries
+                .get(node_sid)
+                .ok_or(InvalidStructure)?
                 .children_map
                 .get(&name_lower)
                 .ok_or(InvalidStructure)?;
         }
 
         validate!(
-            self.direntries[node_sid].packed.entry_type == STGTY_STREAM,
+            self.direntries
+                .get(node_sid)
+                .ok_or(InvalidStructure)?
+                .packed
+                .entry_type
+                == STGTY_STREAM,
             InvalidStructure
         )?;
 
@@ -229,7 +240,8 @@ impl OleFile {
         }
 
         // Write data sector by sector, following the FAT
-        let nb_sectors = ((stream_size + self.sector_size as u64 - 1) / self.sector_size as u64) as usize;
+        let nb_sectors =
+            ((stream_size + self.sector_size as u64 - 1) / self.sector_size as u64) as usize;
         let mut sect = start_sector;
         let mut data_offset = 0usize;
 
@@ -239,10 +251,7 @@ impl OleFile {
             }
 
             let file_offset = ((sect + 1) * self.sector_size) as usize;
-            let bytes_to_write = std::cmp::min(
-                self.sector_size as usize,
-                data.len() - data_offset
-            );
+            let bytes_to_write = std::cmp::min(self.sector_size as usize, data.len() - data_offset);
 
             self.raw[file_offset..(file_offset + bytes_to_write)]
                 .copy_from_slice(&data[data_offset..(data_offset + bytes_to_write)]);
@@ -261,7 +270,11 @@ impl OleFile {
     /// the ministream, which in turn maps to a physical offset in `self.raw` via the
     /// ministream's own main-FAT sector chain. `mini_sector_size` (64) always divides
     /// `sector_size` (512), so a mini-sector never straddles two physical sectors.
-    fn write_mini_stream(&mut self, start_mini_sector: u32, data: &[u8]) -> Result<(), DecryptError> {
+    fn write_mini_stream(
+        &mut self,
+        start_mini_sector: u32,
+        data: &[u8],
+    ) -> Result<(), DecryptError> {
         // The mini-FAT and ministream are loaded lazily when a small stream is first
         // opened; decrypt paths always read before writing, but load defensively.
         if self.ministream.is_none() {
@@ -293,19 +306,23 @@ impl OleFile {
             let sector_ord = ministream_byte / sector_size;
             let off_in_sect = ministream_byte % sector_size;
 
-            let phys = *container_sectors
-                .get(sector_ord)
-                .ok_or(InvalidStructure)?;
+            let phys = *container_sectors.get(sector_ord).ok_or(InvalidStructure)?;
             let file_offset = (phys as usize + 1) * sector_size + off_in_sect;
 
             let bytes_to_write = std::cmp::min(mini, data.len() - data_offset);
-            validate!(file_offset + bytes_to_write <= self.raw.len(), InvalidStructure)?;
+            validate!(
+                file_offset + bytes_to_write <= self.raw.len(),
+                InvalidStructure
+            )?;
 
             self.raw[file_offset..(file_offset + bytes_to_write)]
                 .copy_from_slice(&data[data_offset..(data_offset + bytes_to_write)]);
 
             data_offset += bytes_to_write;
-            mini_sect = *self.minifat.get(mini_sect as usize).ok_or(InvalidStructure)?;
+            mini_sect = *self
+                .minifat
+                .get(mini_sect as usize)
+                .ok_or(InvalidStructure)?;
         }
 
         Ok(())
@@ -340,7 +357,7 @@ impl OleFile {
         Ok(())
     }
 
-    fn load_fat_sect(&mut self, sect: &[u32]) {
+    fn load_fat_sect(&mut self, sect: &[u32]) -> Result<(), DecryptError> {
         for isect in sect {
             // labeled as JYTHON-WORKAROUND in the olefile code
             // let isect = isect & 0xFFFFFFFF;
@@ -348,21 +365,36 @@ impl OleFile {
             if isect == ENDOFCHAIN || isect == FREESECT {
                 break;
             }
-            let start = (self.sector_size * (isect + 1)) as usize;
-            let s = &self.raw[start..(start + self.sector_size as usize)];
+            validate!(isect < self.nb_sect, InvalidStructure)?;
+            let start = (self.sector_size as usize)
+                .checked_mul(isect as usize + 1)
+                .ok_or(InvalidStructure)?;
+            let end = start
+                .checked_add(self.sector_size as usize)
+                .ok_or(InvalidStructure)?;
+            let s = self.raw.get(start..end).ok_or(InvalidStructure)?;
             let next_fat = sect_to_array(s);
             self.fat.extend_from_slice(next_fat);
         }
+        Ok(())
     }
 
-    fn load_fat_sect_range(&mut self, sect_start: usize, sect_end: usize) {
-        let sect = &self.raw[sect_start..sect_end].to_owned();
-        let fat1: &[u32] = sect_to_array(sect);
-        self.load_fat_sect(fat1);
+    fn load_fat_sect_range(
+        &mut self,
+        sect_start: usize,
+        sect_end: usize,
+    ) -> Result<(), DecryptError> {
+        let sect = self
+            .raw
+            .get(sect_start..sect_end)
+            .ok_or(InvalidStructure)?
+            .to_owned();
+        let fat1: &[u32] = sect_to_array(&sect);
+        self.load_fat_sect(fat1)
     }
 
     fn load_fat(&mut self) -> Result<(), DecryptError> {
-        self.load_fat_sect_range(76, 512);
+        self.load_fat_sect_range(76, 512)?;
         // "There's a DIFAT because file is larger than 6.8MB"
         if self.header.num_difat_sectors > 0 {
             validate!(self.header.num_fat_sectors > 109, InvalidStructure)?;
@@ -382,12 +414,22 @@ impl OleFile {
             let mut isect_difat = self.header.first_difat_sector;
 
             for _ in 0..nb_difat {
-                let start = ((self.sector_size) * (isect_difat + 1)) as usize;
-                let sector_difat = self.raw[start..(start + self.sector_size as usize)].to_owned();
+                let start = (self.sector_size as usize)
+                    .checked_mul(isect_difat as usize + 1)
+                    .ok_or(InvalidStructure)?;
+                let end = start
+                    .checked_add(self.sector_size as usize)
+                    .ok_or(InvalidStructure)?;
+                let sector_difat = self.raw.get(start..end).ok_or(InvalidStructure)?.to_owned();
                 let difat = sect_to_array(&sector_difat);
 
-                self.load_fat_sect(&difat[..(nb_difat_sectors as usize)]);
-                isect_difat = difat[nb_difat_sectors as usize];
+                let fat_sectors = difat
+                    .get(..nb_difat_sectors as usize)
+                    .ok_or(InvalidStructure)?;
+                self.load_fat_sect(fat_sectors)?;
+                isect_difat = *difat
+                    .get(nb_difat_sectors as usize)
+                    .ok_or(InvalidStructure)?;
             }
 
             validate!(
@@ -405,9 +447,10 @@ impl OleFile {
 
     fn load_directory(&mut self, sect: u32) -> Result<(), DecryptError> {
         self.directory_fp = self.open_helper(sect, UNKNOWN_SIZE as u64, true)?;
-        let max_entries = self.directory_fp.size / 128;
+        let max_entries = self.directory_fp.stream.len() / 128;
+        validate!(max_entries > 0, InvalidStructure)?;
         // build direntries and figure out what struct type each is
-        self.direntries = vec![OleDirentry::default(); max_entries as usize];
+        self.direntries = vec![OleDirentry::default(); max_entries];
         self.load_direntry(0)?;
         self.build_storage_tree(self.root_sid)
     }
@@ -418,7 +461,11 @@ impl OleFile {
         validate!(!self.direntries[sid].used, Unknown)?;
 
         let start = sid * 128;
-        let entry = &self.directory_fp.stream[start..(start + 128)];
+        let entry = self
+            .directory_fp
+            .stream
+            .get(start..start + 128)
+            .ok_or(InvalidStructure)?;
         let direntry = OleDirentry::new(entry.try_into().map_err(|_| Unknown)?, sid, self)?;
         self.direntries[sid] = direntry;
 
@@ -447,7 +494,11 @@ impl OleFile {
 
         let s = self.open_helper(self.header.first_mini_fat_sector, stream_size, true)?;
         self.minifat = sect_to_array(&s.stream).to_vec();
-        self.minifat = self.minifat[..nb_minisectors as usize].to_vec();
+        self.minifat = self
+            .minifat
+            .get(..nb_minisectors as usize)
+            .ok_or(InvalidStructure)?
+            .to_vec();
 
         Ok(())
     }
@@ -625,8 +676,14 @@ impl OleStream {
                 break;
             }
             validate!(sect < fat_len, InvalidStructure)?;
-            let start = (self.offset + self.sector_size * sect) as usize;
-            let sector_data = &raw[start..(start + self.sector_size as usize)];
+            let start = (self.sector_size as usize)
+                .checked_mul(sect as usize)
+                .and_then(|value| value.checked_add(self.offset as usize))
+                .ok_or(InvalidStructure)?;
+            let end = start
+                .checked_add(self.sector_size as usize)
+                .ok_or(InvalidStructure)?;
+            let sector_data = raw.get(start..end).ok_or(InvalidStructure)?;
             // TODO last sector might have less than 512/4k, so read less on index
             validate!(
                 sector_data.len() == self.sector_size as usize || sect == (fat_len - 1),
@@ -636,7 +693,7 @@ impl OleStream {
 
             // labeled as JYTHON_WORKAROUND in the olefile code
             // sect = fat[sect as usize] & 0xFFFFFFFF;
-            sect = fat[sect as usize];
+            sect = *fat.get(sect as usize).ok_or(InvalidStructure)?;
         }
 
         if data.len() >= self.size as usize {
@@ -780,7 +837,17 @@ fn convert_clsid(clsid: [u8; 16]) -> Result<String, DecryptError> {
     let d3 = u16::from_le_bytes([clsid[6], clsid[7]]);
     Ok(format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        d1, d2, d3, clsid[8], clsid[9], clsid[10], clsid[11], clsid[12], clsid[13], clsid[14], clsid[15]
+        d1,
+        d2,
+        d3,
+        clsid[8],
+        clsid[9],
+        clsid[10],
+        clsid[11],
+        clsid[12],
+        clsid[13],
+        clsid[14],
+        clsid[15]
     ))
 }
 

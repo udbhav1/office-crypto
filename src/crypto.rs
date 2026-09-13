@@ -23,6 +23,9 @@ const _BLOCK5: [u8; 8] = [0xA0, 0x67, 0x7F, 0x02, 0xB2, 0x2C, 0x84, 0x33];
 
 const SEGMENT_LENGTH: usize = 4096;
 const ITER_COUNT: u32 = 50000;
+// Office currently writes 100,000 iterations. A generous upper bound prevents a crafted
+// EncryptionInfo stream from turning password derivation into an unbounded CPU denial of service.
+const MAX_SPIN_COUNT: u32 = 1_000_000;
 
 fn b64_decode(bytes: &[u8]) -> Result<Vec<u8>, DecryptError> {
     let mut wrapped_reader = Cursor::new(bytes);
@@ -53,8 +56,14 @@ pub(crate) struct AgileEncryptionInfo {
 
 impl AgileEncryptionInfo {
     pub fn new(encryption_info: &OleStream) -> Result<Self, DecryptError> {
-        let raw_xml = String::from_utf8(encryption_info.stream[8..].to_vec())
-            .map_err(|_| InvalidStructure)?;
+        let raw_xml = String::from_utf8(
+            encryption_info
+                .stream
+                .get(8..)
+                .ok_or(InvalidStructure)?
+                .to_vec(),
+        )
+        .map_err(|_| InvalidStructure)?;
 
         let mut reader = Reader::from_str(&raw_xml);
         reader.config_mut().trim_text(true);
@@ -65,7 +74,7 @@ impl AgileEncryptionInfo {
         let mut set_password_node = false;
 
         loop {
-            match reader.read_event().unwrap() {
+            match reader.read_event().map_err(|_| InvalidStructure)? {
                 Event::Empty(e) => match e.name().as_ref() {
                     b"keyData" if !set_key_data => {
                         for attr in e.attributes() {
@@ -155,6 +164,12 @@ impl AgileEncryptionInfo {
         validate!(set_key_data, InvalidStructure)?;
         validate!(set_hmac_data, InvalidStructure)?;
         validate!(set_password_node, InvalidStructure)?;
+        validate!(aei.key_data_block_size == 16, InvalidStructure)?;
+        validate!(aei.key_data_salt.len() >= 16, InvalidStructure)?;
+        validate!(aei.password_salt.len() == 16, InvalidStructure)?;
+        validate!(aei.password_key_bits == 256, InvalidStructure)?;
+        validate!(aei.encrypted_key_value.len() == 32, InvalidStructure)?;
+        validate!(aei.spin_count <= MAX_SPIN_COUNT, InvalidStructure)?;
 
         Ok(aei)
     }
@@ -171,10 +186,35 @@ impl AgileEncryptionInfo {
         encrypted_stream: &OleStream,
     ) -> Result<Vec<u8>, DecryptError> {
         let total_size = u32::from_le_bytes(
-            encrypted_stream.stream[..4]
+            encrypted_stream
+                .stream
+                .get(..4)
+                .ok_or(InvalidStructure)?
                 .try_into()
                 .map_err(|_| InvalidStructure)?,
         ) as usize;
+        let ciphertext = encrypted_stream.stream.get(8..).ok_or(InvalidStructure)?;
+        let full_segments = total_size / SEGMENT_LENGTH;
+        let final_plaintext_len = total_size % SEGMENT_LENGTH;
+        let final_ciphertext_len = final_plaintext_len
+            .checked_add(15)
+            .ok_or(InvalidStructure)?
+            / 16
+            * 16;
+        let expected_ciphertext_len = full_segments
+            .checked_mul(SEGMENT_LENGTH)
+            .and_then(|size| size.checked_add(final_ciphertext_len))
+            .ok_or(InvalidStructure)?;
+
+        // The plaintext size is attacker-controlled. Validate it against the actual encrypted
+        // payload before allocating or slicing, otherwise a tiny malformed file can request a
+        // multi-gigabyte allocation and then panic.
+        validate!(total_size > 0, InvalidStructure)?;
+        validate!(
+            ciphertext.len() == expected_ciphertext_len,
+            InvalidStructure
+        )?;
+
         let mut block_start: usize = 8; // skip first 8 bytes
         let mut block_index: u32 = 0;
         let mut decrypted: Vec<u8> = vec![0; total_size];
@@ -182,7 +222,7 @@ impl AgileEncryptionInfo {
 
         match self.key_data_hash_algorithm.as_str() {
             "SHA512" => {
-                while block_start < (total_size - SEGMENT_LENGTH) {
+                while total_size - (block_start - 8) > SEGMENT_LENGTH {
                     let iv = Sha512::digest([key_data_salt, &block_index.to_le_bytes()].concat());
                     let iv = &iv[..16];
 
@@ -208,7 +248,10 @@ impl AgileEncryptionInfo {
                 let irregular_block_len = remaining % 16;
 
                 // remaining bytes in encrypted_stream should be a multiple of block size even if we only use some of the decrypted bytes
-                let ciphertext = &encrypted_stream.stream[block_start..];
+                let ciphertext = encrypted_stream
+                    .stream
+                    .get(block_start..)
+                    .ok_or(InvalidStructure)?;
                 validate!(ciphertext.len() % 16 == 0, InvalidStructure)?;
 
                 let mut plaintext: Vec<u8> = vec![0; ciphertext.len()];
@@ -257,7 +300,10 @@ impl AgileEncryptionInfo {
         match self.password_hash_algorithm.as_str() {
             "SHA512" => {
                 let h = Sha512::digest([digest, block].concat());
-                Ok(h.as_slice()[..(self.password_key_bits as usize / 8)].to_owned())
+                h.as_slice()
+                    .get(..self.password_key_bits as usize / 8)
+                    .map(ToOwned::to_owned)
+                    .ok_or(InvalidStructure)
             }
             "SHA384" => Err(Unimplemented("SHA384".to_owned())),
             "SHA256" => Err(Unimplemented("SHA256".to_owned())),
@@ -267,15 +313,19 @@ impl AgileEncryptionInfo {
     }
 
     fn decrypt_aes_cbc(&self, key: &[u8]) -> Result<Vec<u8>, DecryptError> {
+        validate!(key.len() == 32, InvalidStructure)?;
+        validate!(self.password_salt.len() == 16, InvalidStructure)?;
+        validate!(self.encrypted_key_value.len() == 32, InvalidStructure)?;
+
         let mut cbc_cipher =
             cbc::Decryptor::<aes::Aes256>::new(key.into(), self.password_salt.as_slice().into());
 
         // two 16-byte cbc blocks
         // TODO how does the hash func affect # of blocks?
         let i1: GenericArray<u8, U16> =
-            GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[..16]);
+            GenericArray::clone_from_slice(&self.encrypted_key_value[..16]);
         let i2: GenericArray<u8, U16> =
-            GenericArray::clone_from_slice(&self.encrypted_key_value.clone()[16..]);
+            GenericArray::clone_from_slice(&self.encrypted_key_value[16..]);
         let ciphertext_blocks = [i1, i2];
 
         let o1: GenericArray<u8, U16> = GenericArray::default();
@@ -323,11 +373,21 @@ impl StandardEncryptionInfo {
         //         .map_err(|_| InvalidStructure)?,
         // );
         let header_size = u32::from_le_bytes(
-            encryption_info.stream[8..12]
+            encryption_info
+                .stream
+                .get(8..12)
+                .ok_or(InvalidStructure)?
                 .try_into()
                 .map_err(|_| InvalidStructure)?,
         );
-        let header_bytes = &encryption_info.stream[12..(12 + header_size as usize)];
+        let header_end = 12usize
+            .checked_add(header_size as usize)
+            .ok_or(InvalidStructure)?;
+        let header_bytes = encryption_info
+            .stream
+            .get(12..header_end)
+            .ok_or(InvalidStructure)?;
+        validate!(header_bytes.len() >= 32, InvalidStructure)?;
         let mut sei = Self::default();
 
         // TODO switch to packed struct maybe
@@ -368,7 +428,7 @@ impl StandardEncryptionInfo {
                 .map_err(|_| InvalidStructure)?,
         );
 
-        let csp_utf16 = header_bytes[32..].to_owned();
+        let csp_utf16 = header_bytes.get(32..).ok_or(InvalidStructure)?.to_owned();
         let csp_utf16: &[u16] = unsafe { csp_utf16.align_to::<u16>().1 };
         sei.csp_name = String::from_utf16(csp_utf16).map_err(|_| InvalidStructure)?;
 
@@ -377,8 +437,16 @@ impl StandardEncryptionInfo {
             sei.alg_id & 0xFF00 == 0x6600,
             Unimplemented("RC4".to_owned())
         )?;
+        // This implementation uses AES-128 below. Reject AES-192/256 metadata instead of
+        // passing a differently sized attacker-controlled key into a fixed-size cipher.
+        validate!(sei.alg_id == 0x660E, Unimplemented("non-AES128".to_owned()))?;
+        validate!(sei.key_size == 128, InvalidStructure)?;
 
-        let verifier_bytes = &encryption_info.stream[(12 + header_size as usize)..];
+        let verifier_bytes = encryption_info
+            .stream
+            .get(header_end..)
+            .ok_or(InvalidStructure)?;
+        validate!(verifier_bytes.len() >= 72, InvalidStructure)?;
 
         sei.salt_size = u32::from_le_bytes(
             verifier_bytes[..4]
@@ -393,6 +461,8 @@ impl StandardEncryptionInfo {
                 .map_err(|_| InvalidStructure)?,
         );
         sei.encrypted_verifier_hash = verifier_bytes[40..72].to_owned();
+        validate!(sei.salt_size == 16, InvalidStructure)?;
+        validate!(sei.verifier_hash_size == 20, InvalidStructure)?;
 
         Ok(sei)
     }
@@ -419,7 +489,11 @@ impl StandardEncryptionInfo {
         buf2.iter_mut().zip(h.iter()).for_each(|(a, b)| *a ^= *b);
         let x2 = Sha1::digest(buf2);
 
-        Ok([x1, x2].concat()[..(cb_required_key_length as usize)].to_owned())
+        [x1, x2]
+            .concat()
+            .get(..cb_required_key_length as usize)
+            .map(ToOwned::to_owned)
+            .ok_or(InvalidStructure)
     }
 
     pub fn decrypt(
@@ -427,29 +501,102 @@ impl StandardEncryptionInfo {
         key: &[u8],
         encrypted_stream: &OleStream,
     ) -> Result<Vec<u8>, DecryptError> {
+        validate!(key.len() == 16, InvalidStructure)?;
         let total_size = u32::from_le_bytes(
-            encrypted_stream.stream[..4]
+            encrypted_stream
+                .stream
+                .get(..4)
+                .ok_or(InvalidStructure)?
                 .try_into()
                 .map_err(|_| InvalidStructure)?,
         ) as usize;
-        // has to be big enough to decrypt into
-        let mut decrypted: Vec<u8> = vec![0; encrypted_stream.stream.len()];
-        let block_start = 8;
+        let ciphertext = encrypted_stream.stream.get(8..).ok_or(InvalidStructure)?;
 
         // 16 bit blocks
-        validate!(
-            (encrypted_stream.stream.len() - 8) % 16 == 0,
-            InvalidStructure
-        )?;
+        validate!(ciphertext.len() % 16 == 0, InvalidStructure)?;
+        validate!(total_size <= ciphertext.len(), InvalidStructure)?;
+
+        // Allocate only after the declared plaintext size has been bounded by the payload.
+        let mut decrypted: Vec<u8> = vec![0; ciphertext.len()];
 
         let ecb_cipher = ecb::Decryptor::<aes::Aes128>::new(key.into());
         ecb_cipher
-            .decrypt_padded_b2b_mut::<NoPadding>(
-                &encrypted_stream.stream[block_start..],
-                &mut decrypted,
-            )
+            .decrypt_padded_b2b_mut::<NoPadding>(ciphertext, &mut decrypted)
             .map_err(|_| InvalidStructure)?;
 
         Ok(decrypted[..total_size].to_vec())
+    }
+}
+
+#[cfg(test)]
+mod malformed_input_tests {
+    use super::*;
+
+    fn stream_with_declared_size(declared_size: u32, ciphertext_len: usize) -> OleStream {
+        let mut stream = OleStream::default();
+        stream.stream = vec![0; 8 + ciphertext_len];
+        stream.stream[..4].copy_from_slice(&declared_size.to_le_bytes());
+        stream
+    }
+
+    #[test]
+    fn agile_rejects_declared_size_larger_than_payload_before_allocating() {
+        let encryption = AgileEncryptionInfo {
+            key_data_hash_algorithm: "SHA512".to_owned(),
+            key_data_salt: vec![0; 16],
+            ..Default::default()
+        };
+        let stream = stream_with_declared_size(u32::MAX, 16);
+
+        let result = std::panic::catch_unwind(|| encryption.decrypt(&[0; 32], &stream));
+        assert!(matches!(result, Ok(Err(DecryptError::InvalidStructure))));
+    }
+
+    #[test]
+    fn agile_rejects_truncated_segment_before_allocating() {
+        let encryption = AgileEncryptionInfo {
+            key_data_hash_algorithm: "SHA512".to_owned(),
+            key_data_salt: vec![0; 16],
+            ..Default::default()
+        };
+        let stream = stream_with_declared_size((SEGMENT_LENGTH + 1) as u32, SEGMENT_LENGTH);
+
+        assert!(matches!(
+            encryption.decrypt(&[0; 32], &stream),
+            Err(DecryptError::InvalidStructure)
+        ));
+    }
+
+    #[test]
+    fn standard_rejects_declared_size_larger_than_payload_before_allocating() {
+        let encryption = StandardEncryptionInfo::default();
+        let stream = stream_with_declared_size(u32::MAX, 16);
+
+        let result = std::panic::catch_unwind(|| encryption.decrypt(&[0; 16], &stream));
+        assert!(matches!(result, Ok(Err(DecryptError::InvalidStructure))));
+    }
+
+    #[test]
+    fn standard_rejects_invalid_key_length_without_panicking() {
+        let encryption = StandardEncryptionInfo::default();
+        let stream = stream_with_declared_size(16, 16);
+
+        let result = std::panic::catch_unwind(|| encryption.decrypt(&[0; 32], &stream));
+        assert!(matches!(result, Ok(Err(DecryptError::InvalidStructure))));
+    }
+
+    #[test]
+    fn parsers_reject_truncated_encryption_info_without_panicking() {
+        let mut stream = OleStream::default();
+        stream.stream = vec![0; 4];
+
+        assert!(matches!(
+            AgileEncryptionInfo::new(&stream),
+            Err(DecryptError::InvalidStructure)
+        ));
+        assert!(matches!(
+            StandardEncryptionInfo::new(&stream),
+            Err(DecryptError::InvalidStructure)
+        ));
     }
 }
